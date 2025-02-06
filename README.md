@@ -2,7 +2,7 @@
 
 **by TheNizix  02/2025** 
 
-Updated 16:22  6/2/25
+Updated 23.00  6/2/25
 
 > [!TIP]
 >
@@ -228,8 +228,6 @@ vzdump [vmid] --compress zstd --mode snapshot
 
 La Creazione di questa guida e' un backlog di 2 giorni di lavoro per padroneggiare il sistema.
 Incolonnato malamente, stralciato e corretto con  un Ai.
-
-Ho incluso degli esercizi semplici con soluzione.
 Nella Repo ci sono alcuni scripts in bash AutoEsplicativi che eseguono piccole funzioni base.
 Questo prima che preso da un assalto di automazionite abbia deciso di andare oltre..
 ...
