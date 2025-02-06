@@ -1,0 +1,150 @@
+1. # Guida Completa all'Implementazione di Proxmox VE
+
+   ## Prefazione
+   Questa guida è stata sviluppata per fornire un'implementazione completa e pratica di Proxmox Virtual Environment (VE), con particolare attenzione alle esigenze degli utenti italiani. Le procedure sono state accuratamente testate e validate in ambienti di produzione.
+
+   ## Introduzione a Proxmox VE
+   Proxmox VE è una piattaforma di virtualizzazione open source che combina due potenti tecnologie:
+   - KVM (Kernel-based Virtual Machine) per le macchine virtuali tradizionali
+   - LXC (Linux Containers) per la containerizzazione leggera
+
+   La scelta di Proxmox VE offre diversi vantaggi:
+   - Soluzione completamente open source
+   - Interfaccia web intuitiva basata su Debian
+   - Supporto nativo per cluster fisici
+   - Migrazione a caldo delle macchine virtuali
+   - Gestione integrata dei container LXC
+
+   ### Requisiti di Sistema
+   Prima di iniziare l'installazione, è necessario verificare che il sistema soddisfi i seguenti requisiti minimi:
+
+   - **CPU**: processore 64-bit (Intel EMT64 o AMD64) con supporto per virtualizzazione
+     - Intel: tecnologia VT-x
+     - AMD: tecnologia AMD-V
+   - **RAM**: minimo 8GB per uso base, consigliati 16GB per ambienti di produzione
+   - **Storage**:
+     - Sistema operativo: minimo 32GB
+     - Spazio aggiuntivo per VM/Container: in base alle necessità
+   - **Rete**: scheda di rete Gigabit (consigliata)
+   - **Configurazione dischi**:
+     - Disco 1: dedicato al sistema operativo Proxmox
+     - Disco 2: dedicato allo storage per VM/Container
+
+   
+
+   ## Capitolo 1: Verifica e Preparazione del Sistema
+
+   ### Script di Verifica Prerequisiti
+   Prima dell'installazione, è fondamentale eseguire una verifica completa del sistema. Il seguente script automatizza questo processo:
+
+   ```bash
+   #!/bin/bash 
+   #verifica.sh
+   echo "=== Verifica Prerequisiti Proxmox VE ==="
+   
+   # Verifica del supporto per la virtualizzazione CPU
+   if grep -E 'svm|vmx' /proc/cpuinfo > /dev/null; then
+       echo "[✓] Supporto virtualizzazione CPU attivo"
+       if grep -q 'vmx' /proc/cpuinfo; then
+           echo "    Tipo: Intel VT-x"
+       elif grep -q 'svm' /proc/cpuinfo; then
+           echo "    Tipo: AMD-V"
+       fi
+       
+       # Verifica IOMMU (importante per il passthrough PCI)
+       if dmesg | grep -i -e DMAR -e IOMMU > /dev/null; then
+           echo "[✓] IOMMU attivo"
+       else
+           echo "[!] IOMMU non rilevato - necessario per il passthrough PCI"
+       fi
+   else
+       echo "[✗] Virtualizzazione CPU non disponibile"
+       echo "    Attivare VT-x/AMD-V nel BIOS"
+       exit 1
+   fi
+   
+   # Verifica della memoria disponibile
+   mem_total=$(free -g | awk '/^Mem:/{print $2}')
+   if [ $mem_total -ge 16 ]; then
+       echo "[✓] RAM ottimale: ${mem_total}GB"
+   elif [ $mem_total -ge 8 ]; then
+       echo "[!] RAM sufficiente ma limitata: ${mem_total}GB"
+       echo "    Consigliato upgrade a 16GB+ per ambienti di produzione"
+   else
+       echo "[✗] RAM insufficiente: ${mem_total}GB"
+       echo "    Minimo raccomandato: 8GB"
+       exit 1
+   fi
+   
+   # Analisi configurazione dischi
+   echo "=== Analisi Configurazione Dischi ==="
+   lsblk -d -o NAME,SIZE,MODEL,ROTA | grep -v loop
+   echo "Verificare la presenza di almeno due dischi separati:"
+   echo "1. Disco Sistema: minimo 32GB"
+   echo "2. Disco Storage: dimensionamento in base alle necessità"
+   
+   # Verifica connettività di rete
+   echo "=== Analisi Configurazione Rete ==="
+   for iface in $(ls /sys/class/net/ | grep -v lo); do
+       speed=$(cat /sys/class/net/$iface/speed 2>/dev/null)
+       if [ ! -z "$speed" ]; then
+           if [ $speed -ge 1000 ]; then
+               echo "[✓] $iface: $speed Mbps"
+           else
+               echo "[!] $iface: $speed Mbps (consigliato Gigabit)"
+           fi
+       fi
+   done
+   ```
+
+   ### Preparazione dell'Ambiente di Installazione
+
+   Prima di procedere con l'installazione vera e propria, è necessario preparare l'ambiente. Ecco i passaggi fondamentali:
+
+   1. **Download dell'ISO**
+      - Scaricare l'ultima versione di Proxmox VE dal sito ufficiale
+      - Verificare l'integrità del file tramite checksum SHA256
+      
+   2. **Preparazione del Supporto di Installazione**
+      Per sistemi Linux:
+      ```bash
+      # Creazione chiavetta USB avviabile
+      dd if=proxmox-ve_*.iso of=/dev/sdX bs=1M status=progress
+      ```
+      Per sistemi Windows:
+      - Utilizzare Rufus in modalità DD image
+      - Selezionare la modalità di scrittura diretta dell'immagine
+
+   3. **Configurazione del BIOS/UEFI**
+      - Abilitare le tecnologie di virtualizzazione (VT-x/AMD-V)
+      - Attivare IOMMU se si prevede di utilizzare il passthrough PCI
+      - Configurare l'ordine di boot per avviare da USB
+      - Se possibile, abilitare la modalità UEFI
+
+   ### Note sulla Scelta del Filesystem
+
+   Proxmox VE supporta diversi filesystem per lo storage locale. Ecco le principali opzioni:
+
+   - **ZFS**: Consigliato per ambienti di produzione
+     - Supporto nativo per snapshot
+     - Compressione trasparente
+     - Deduplicazione dei dati
+     - Richiede più RAM (minimo 8GB consigliati)
+
+   - **LVM-thin**: Alternativa leggera a ZFS
+     - Minore overhead di memoria
+     - Supporto per thin provisioning
+     - Compatibilità con hardware meno recente
+
+   - **ext4**: Opzione base
+     - Prestazioni affidabili
+     - Minore complessità
+     - Limitazioni nelle funzionalità avanzate
+
+   La scelta del filesystem dovrebbe essere basata su:
+   - Quantità di RAM disponibile
+   - Tipo di carico di lavoro previsto
+   - Necessità di funzionalità avanzate
+   - Familiarità con la gestione del filesystem
+
+    
