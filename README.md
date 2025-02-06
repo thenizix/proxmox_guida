@@ -2,6 +2,8 @@
 
 **by TheNizix  02/2025** 
 
+Updated 16:22  6/2/25
+
 > [!TIP]
 >
 >  Lo script dal Capitolo 1 è pensato per automatizzare il partizionamento del disco dopo l'installazione base di Proxmox, ma prima dobbiamo effettivamente installare Proxmox sul server. i:
