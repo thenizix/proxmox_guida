@@ -841,13 +841,10 @@ EOL
 
    1. Salvare lo script come `proxmox-kali-setup.sh`
    2. Rendere lo script eseguibile:
-
    ```bash
    chmod +x proxmox-kali-setup.sh
    ```
-
    3. Eseguire come root:
-
    ```bash
    ./proxmox-kali-setup.sh
    ```
@@ -885,28 +882,24 @@ EOL
    ## Troubleshooting
 
    1. **Problemi Download:**
-
       ```bash
       # Verifica download manuale
       wget https://cdimage.kali.org/kali-2024.1/kali-linux-2024.1-installer-amd64.iso
       ```
 
    2. **Problemi Template:**
-
       ```bash
       # Verifica stato template
       qm status 9000
       ```
 
    3. **Problemi Rete:**
-
       ```bash
       # Verifica bridge
       ip a show vmbr1
       ```
 
    4. **Log Proxmox:**
-
       ```bash
       # Consulta log
       tail -f /var/log/proxmox-setup.log
@@ -1136,281 +1129,21 @@ Questi esercizi richiedono una comprensione approfondita della sicurezza Linux e
 
 #### **Obiettivo**
 
-Questo script configura un cluster Proxmox VE e abilita l’alta disponibilità (HA) tramite Corosync, fencing e monitoraggio. L’obiettivo è garantire che i nodi possano lavorare in sinergia e, in caso di guasto di uno, il servizio continui a funzionare senza interruzioni.
+Questo script configura un cluster Proxmox VE e abilita l’alta disponibilità (HA) tramite Corosync, fencing e monitoraggio. L'obiettivo è garantire che i nodi possano operare in sinergia e che, in caso di guasto di uno di essi, i servizi continuino a funzionare senza interruzioni.
 
-#### **Spiegazione del Codice**
+#### **Miglioramento del Monitoraggio del Cluster**
 
-```bash
-#!/bin/bash
-# Script per configurare il clustering e l'alta disponibilità (HA) in Proxmox VE.
-# Lo script:
-# 1. Configura la rete dedicata al cluster.
-# 2. Inizializza il cluster se il nodo non ne fa già parte.
-# 3. Configura gruppi HA e fencing per prevenire split-brain.
-# 4. Abilita il monitoraggio del cluster.
+Per migliorare la gestione delle risorse e prevenire colli di bottiglia, lo script di monitoraggio `cluster-monitor.sh` è stato aggiornato per includere il controllo dell'utilizzo della CPU su ciascun nodo remoto.
 
-# Costanti e variabili di configurazione
-readonly COROSYNC_CONF="/etc/pve/corosync.conf"  # File di configurazione per Corosync
-readonly HA_GROUP_CONF="/etc/pve/ha/groups.cfg"     # File per i gruppi HA
-readonly QUORUM_NODES=2                             # Numero minimo di nodi per il quorum
+**Novità introdotte:**
 
-# Funzione detect_cluster_network:
-# Seleziona l'interfaccia con maggiore throughput per il traffico cluster e ne estrae la subnet.
-detect_cluster_network() {
-    local best_interface
-    best_interface=$(ip -o link show | grep -Ev "lo|vmbr|docker|veth" | \
-        while read -r line; do
-            iface=$(echo "$line" | awk -F': ' '{print $2}')
-            speed=$(cat /sys/class/net/"$iface"/speed 2>/dev/null || echo "0")
-            echo "$iface $speed"
-        done | sort -k2 -nr | head -1 | awk '{print $1}')
-    if [ -z "$best_interface" ]; then
-        log "ERROR" "Interfaccia per cluster non trovata"
-    fi
-    local ip_info
-    ip_info=$(ip -4 addr show "$best_interface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+')
-    local subnet
-    subnet=$(ipcalc -n "$ip_info" | awk '/Network/ {print $2}')
-    echo "$subnet"
-}
+- **Rilevamento e configurazione automatica della rete cluster:** La funzione `detect_cluster_network` individua automaticamente l'interfaccia più veloce e configura una VLAN dedicata, ottimizzando il traffico interno del cluster.
+- **Monitoraggio avanzato:** Oltre allo stato del cluster e alla latenza tra i nodi, la funzione `monitor_cpu_usage` esegue un controllo periodico del carico della CPU su ciascun nodo remoto tramite SSH.
+- **Notifiche di sovraccarico:** Se l'utilizzo della CPU supera una soglia predefinita (`CPU_THRESHOLD=80`), viene generato un avviso nel log.
 
-# Funzione prepare_cluster_network:
-# Configura una VLAN dedicata per il traffico cluster sul bridge principale (vmbr0) e applica tuning di rete.
-prepare_cluster_network() {
-    local cluster_net
-    cluster_net=$(detect_cluster_network)
-    # Ottiene l'indirizzo IP del nodo (escludendo loopback)
-    local node_ip
-    node_ip=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -1)
-    # Aggiunge una sezione al file /etc/network/interfaces per la VLAN dedicata al cluster
-    cat >> /etc/network/interfaces << EOL
+#### **Script aggiornato per il monitoraggio del cluster**
 
-# Interfaccia dedicata al traffico cluster (VLAN 4000)
-auto vmbr0.4000
-iface vmbr0.4000 inet static
-    address ${node_ip}
-    netmask 255.255.255.0
-    vlan-raw-device vmbr0
-    mtu 9000  # Abilita jumbo frames per miglior throughput
-EOL
-
-    # Applica ottimizzazioni per il traffico di rete cluster
-    cat >> /etc/sysctl.d/99-network-tuning.conf << 'EOL'
-# Ottimizzazioni per il traffico cluster
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.core.netdev_max_backlog = 50000
-net.ipv4.tcp_mtu_probing = 1
-EOL
-    sysctl -p /etc/sysctl.d/99-network-tuning.conf
-    ifup vmbr0.4000
-    log "INFO" "Rete cluster configurata (VLAN 4000) su vmbr0"
-}
-
-# Funzione initialize_cluster:
-# Inizializza il cluster se il nodo non fa già parte di uno.
-initialize_cluster() {
-    if pvecm status &>/dev/null; then
-        log "INFO" "Nodo già membro di un cluster; salto inizializzazione"
-        return
-    fi
-    local cluster_name="pve-cluster"
-    local node_name
-    node_name=$(hostname)
-    # Usa l'IP configurato sulla VLAN dedicata al cluster
-    local node_ip
-    node_ip=$(ip -4 addr show vmbr0.4000 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    # Crea il cluster con pvecm
-    pvecm create "$cluster_name"
-    # Configura Corosync con parametri ottimizzati per il traffico cluster
-    cat > "$COROSYNC_CONF" << EOL
-totem {
-    version: 2
-    secauth: 1
-    cluster_name: $cluster_name
-    transport: knet
-    interface {
-        linknumber: 0
-        bindnetaddr: ${node_ip%.*}.0
-        mcastport: 5405
-        ttl: 1
-    }
-    token: 3000
-    token_retransmits_before_loss_const: 10
-    join: 60
-    consensus: 3600
-    max_messages: 20
-}
-nodelist {
-    node {
-        ring0_addr: $node_ip
-        nodeid: 1
-        name: $node_name
-    }
-}
-quorum {
-    provider: corosync_votequorum
-    expected_votes: $QUORUM_NODES
-    two_node: 1
-}
-logging {
-    to_logfile: yes
-    logfile: /var/log/corosync/corosync.log
-    to_syslog: yes
-    debug: off
-    timestamp: on
-}
-EOL
-    log "INFO" "Cluster inizializzato: $cluster_name"
-}
-
-# Funzione configure_ha:
-# Configura gruppi HA e il manager HA, poi chiama la funzione di fencing.
-configure_ha() {
-    if ! pvecm status &>/dev/null; then
-        log "ERROR" "Il cluster non è attivo; inizializza il cluster prima di configurare HA"
-    fi
-    cat > "$HA_GROUP_CONF" << EOL
-group: preferred_node1
-    nodes node1:100 node2:80
-    nofailback: 1
-    restricted: 0
-
-group: preferred_node2
-    nodes node2:100 node1:80
-    nofailback: 1
-    restricted: 0
-EOL
-    # Configurazione del manager HA con watchdog
-    cat > /etc/pve/ha/manager.cfg << EOL
-checktime: 60
-max_restart: 3
-min_quorum: $QUORUM_NODES
-watchdog: {
-    module: softdog
-    timeout: 60
-}
-EOL
-    configure_fencing
-}
-
-# Funzione configure_fencing:
-# Configura il fencing per prevenire split-brain, installando agenti fence e impostando politiche per i nodi.
-configure_fencing() {
-    apt install -y fence-agents
-    cat > /etc/pve/ha/fence.d/stonith.conf << EOL
-stonith {
-    mode: automatic
-    timeout: 60
-    priority: 1
-    devices: standard-fence
-}
-
-device {
-    name: standard-fence
-    agent: fence_pve
-    options {
-        delay: 5
-        timeout: 60
-        retry: 3
-    }
-}
-EOL
-    # Per ogni nodo del cluster, aggiunge una configurazione specifica
-    for node in $(pvecm nodes | awk 'NR>2 {print $2}'); do
-        cat >> /etc/pve/ha/fence.d/nodes.conf << EOL
-node $node {
-    device: standard-fence
-    port: $node
-    action: reboot
-    timeout: 60
-}
-EOL
-    done
-    log "INFO" "Fencing configurato per il cluster"
-}
-
-# Funzione setup_cluster_monitoring:
-# Crea uno script e un servizio systemd per monitorare lo stato e le prestazioni del cluster.
-setup_cluster_monitoring() {
-    cat > /usr/local/bin/cluster-monitor.sh << 'EOL'
-#!/bin/bash
-LOG_FILE="/var/log/cluster-monitor.log"
-# Funzione per monitorare lo stato del cluster
-monitor_cluster_status() {
-    local cluster_status
-    cluster_status=$(pvecm status)
-    echo "[$(date)] Cluster Status:" >> "$LOG_FILE"
-    echo "$cluster_status" >> "$LOG_FILE"
-}
-# Funzione per monitorare la latenza tra i nodi
-monitor_cluster_performance() {
-    for node in $(pvecm nodes | awk 'NR>2 {print $2}'); do
-        local ping_time
-        ping_time=$(ping -c 1 $node | grep time= | cut -d= -f4)
-        echo "[$(date)] Node $node latency: $ping_time" >> "$LOG_FILE"
-    done
-}
-while true; do
-    monitor_cluster_status
-    monitor_cluster_performance
-    sleep 60
-done
-EOL
-    chmod +x /usr/local/bin/cluster-monitor.sh
-    cat > /etc/systemd/system/cluster-monitor.service << EOL
-[Unit]
-Description=Cluster Monitoring Service
-After=pve-cluster.service
-
-[Service]
-ExecStart=/usr/local/bin/cluster-monitor.sh
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOL
-    systemctl enable cluster-monitor
-    systemctl start cluster-monitor
-    log "INFO" "Monitoraggio cluster attivato"
-}
-
-# Esecuzione sequenziale:
-prepare_cluster_network
-initialize_cluster
-configure_ha
-setup_cluster_monitoring
 ```
-
-#### **Perché   questo approccio?**
-
-- **Rilevamento e configurazione automatica della rete cluster:**
-  La funzione `detect_cluster_network` individua automaticamente l'interfaccia migliore e configura una VLAN dedicata, ottimizzando il traffico interno del cluster.
-- **Inizializzazione condizionale:**
-  La funzione `initialize_cluster` verifica se il nodo fa già parte di un cluster, evitando ripetute inizializzazioni.
-- **Fencing e HA:**
-  Il fencing previene split-brain e, insieme alla configurazione HA, assicura che il cluster possa gestire guasti in maniera automatica.
-- **Monitoraggio integrato:**
-  La creazione di uno script di monitoraggio e un servizio systemd consente di tenere sotto controllo lo stato del cluster in modo continuo.
-
-#### **Esercizio 5: Personalizzare il Monitoraggio del Cluster**
-
-**Obiettivo:**
-Modificare lo script di monitoraggio (`cluster-monitor.sh`) per includere anche un controllo sull’utilizzo della CPU di ogni nodo remoto (ad esempio, usando `ssh` per eseguire `top` o `mpstat`).
-Inoltre, aggiungere una notifica (ad es. un semplice echo) se l’utilizzo supera una soglia definita (es. 80%).
-
-**Istruzioni:**
-
-1. Aggiungi una funzione `monitor_cpu_usage` nello script di monitoraggio.
-2. Per ogni nodo, esegui il comando remoto per ottenere il carico della CPU.
-3. Se il carico supera la soglia (definita in una variabile, es. `CPU_THRESHOLD=80`), scrivi un messaggio di avviso sul log.
-4. Commenta il codice per spiegare ogni passaggio.
-
-**Soluzione Proposta (modifica dello script di monitoraggio):**
-
-```bash
 #!/bin/bash
 LOG_FILE="/var/log/cluster-monitor.log"
 CPU_THRESHOLD=80
@@ -1432,11 +1165,10 @@ monitor_cluster_performance() {
     done
 }
 
-# Funzione per monitorare l'utilizzo CPU di ogni nodo remoto
+# Funzione per monitorare l'utilizzo della CPU sui nodi remoti
 monitor_cpu_usage() {
     for node in $(pvecm nodes | awk 'NR>2 {print $2}'); do
-        # Esegue un comando remoto via ssh per ottenere l'utilizzo medio della CPU
-        # Nota: Assicurarsi che l'accesso SSH sia configurato senza password per l'automazione
+        # Esegue un comando remoto via SSH per ottenere l'utilizzo medio della CPU
         cpu_usage=$(ssh $node "mpstat 1 1 | awk '/Average/ {print 100 - \$12}'")
         echo "[$(date)] Node $node CPU usage: $cpu_usage%" >> "$LOG_FILE"
         # Se l'utilizzo supera la soglia, segnala un avviso
@@ -1454,13 +1186,20 @@ while true; do
 done
 ```
 
-**Spiegazione della Soluzione:**
+#### **Spiegazione del codice aggiornato**
 
-- Abbiamo aggiunto la funzione `monitor_cpu_usage` che, per ogni nodo, usa `ssh` per eseguire `mpstat` e calcolare l’utilizzo medio della CPU.
-- Se il valore supera la soglia definita in `CPU_THRESHOLD`, viene registrato un messaggio di avviso nel log.
-- I commenti spiegano il flusso e la logica del monitoraggio remoto.
+- `**monitor_cluster_status**`: Registra lo stato attuale del cluster nel log.
+- `**monitor_cluster_performance**`: Controlla la latenza tra i nodi per rilevare eventuali problemi di rete.
+- `**monitor_cpu_usage**`:
+  - Per ogni nodo remoto, esegue `mpstat` tramite SSH per calcolare l'utilizzo della CPU.
+  - Se il valore supera `CPU_THRESHOLD`, registra un messaggio di avviso nel log.
+- **Loop principale**: Ogni 60 secondi esegue le tre funzioni per mantenere un monitoraggio costante.
 
-'Appendice, con azioni pratiche e suggerimenti per gestire Proxmox da remoto via SSH o HTTP (Chrome).
+#### **Vantaggi di questa implementazione**
+
+- **Miglior resilienza**: Il cluster può reagire meglio a carichi elevati grazie al monitoraggio CPU.
+- **Prevenzione proattiva**: Gli amministratori possono intervenire prima che un nodo sovraccarico causi problemi.
+- **Facile integrazione**: Il monitoraggio aggiuntivo si integra senza impattare la configurazione esistente
 
 ------
 
@@ -1603,7 +1342,6 @@ by TheNizix  02/2025
 Dopo aver eseguito gli script di installazione e configurazione dalla guida, avrai un server Proxmox VE completamente configurato con i seguenti componenti:
 
 ### Configurazione Base del Sistema
-
 - Sistema Operativo: Proxmox VE (basato su Debian)
 - Struttura dello Storage:
   - Partizione di sistema (30GB) con filesystem ext4
@@ -1616,7 +1354,6 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
   - VLAN 4000 per la rete del cluster per comunicazioni ad alta disponibilità
 
 ### Configurazione della Sicurezza
-
 - Accesso SSH blindato:
   - Login root limitato all'autenticazione con chiave
   - Autenticazione con password disabilitata
@@ -1630,7 +1367,6 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Parametri di sicurezza del kernel ottimizzati per ambiente di virtualizzazione
 
 ### Configurazione Alta Disponibilità
-
 - Comunicazione cluster Corosync configurata
 - Meccanismi di fencing per prevenire split-brain
 - Gruppi HA definiti per il failover delle VM
@@ -1639,7 +1375,6 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Accesso al Server
 
 ### Accesso Interfaccia Web
-
 - URL: https://[ip-server]:8006
 - Credenziali predefinite:
   - Nome utente: root
@@ -1647,13 +1382,11 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Browser supportati: Versioni recenti di Chrome, Firefox, Safari
 
 ### Accesso SSH
-
 - Comando: `ssh root@[ip-server]`
 - Autenticazione: Richiesta chiave SSH (autenticazione password disabilitata)
 - Porta: 22 (con protezione rate limiting)
 
 ### Accesso di Rete per le VM
-
 - Rete interna: 192.168.100.0/24
 - Gateway predefinito: 192.168.100.1
 - NAT abilitato per accesso internet
@@ -1662,14 +1395,12 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Risorse Disponibili
 
 ### Sistemi di Storage
-
 - Pool di storage Local-LVM per dischi VM
 - Posizione backup: /var/lib/vz/dump
 - Storage ISO: /var/lib/vz/template/iso
 - Storage template: /var/lib/vz/template/cache
 
 ### Template Macchine Virtuali
-
 - Template base Ubuntu Server (ID: 9000)
   - 2GB RAM (modificabile)
   - 2 vCPU (modificabile)
@@ -1680,7 +1411,6 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Utilizzo del Sistema
 
 ### Creazione Nuove Macchine Virtuali
-
 1. Accedere all'interfaccia web
 2. Selezionare 'Crea VM' o clonare il template 9000
 3. Regolare le risorse secondo necessità
@@ -1688,14 +1418,12 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 5. Avviare la VM e accedere alla console tramite interfaccia web
 
 ### Gestione Macchine Virtuali
-
 - Accesso console: Tramite interfaccia web o client SPICE
 - Configurazione rete: Consigliato IP statico nel range 192.168.100.0/24
 - Operazioni di backup: Disponibili tramite interfaccia web o comando `vzdump`
 - Modifica risorse: Possibile durante l'esecuzione della VM per la maggior parte dei parametri
 
 ### Monitoraggio
-
 - Stato sistema: Disponibile tramite dashboard interfaccia web
 - Salute cluster: Accessibile via comando `pvecm status`
 - Utilizzo risorse: Grafici in tempo reale nell'interfaccia web
@@ -1703,7 +1431,6 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Demone di monitoraggio personalizzato: In esecuzione come servizio systemd
 
 ### Operazioni di Backup
-
 - Servizio di backup automatizzato configurato
 - Posizione backup: /mnt/backup
 - Periodo di conservazione: 30 giorni
@@ -1712,14 +1439,12 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Procedure di Manutenzione
 
 ### Aggiornamenti Sistema
-
 ```bash
 apt update
 apt full-upgrade
 ```
 
 ### Verifica Backup
-
 ```bash
 # Controlla stato backup
 ls -l /mnt/backup/dump
@@ -1728,7 +1453,6 @@ vzdump --verify [file-backup]
 ```
 
 ### Gestione Storage
-
 ```bash
 # Controlla stato storage
 pvesm status
@@ -1737,7 +1461,6 @@ df -h
 ```
 
 ### Monitoraggio Sicurezza
-
 ```bash
 # Controlla tentativi di accesso falliti
 fail2ban-client status
@@ -1748,7 +1471,6 @@ iptables -L
 ## Operazioni Comuni
 
 ### Creazione Nuova VM da Template
-
 ```bash
 # Clona template 9000 in nuova VM ID 101
 qm clone 9000 101 --name nuova-vm
@@ -1757,7 +1479,6 @@ qm start 101
 ```
 
 ### Gestione Stati VM
-
 ```bash
 # Ferma VM
 qm stop [vmid]
@@ -1768,7 +1489,6 @@ qm reset [vmid]
 ```
 
 ### Backup Singola VM
-
 ```bash
 vzdump [vmid] --compress zstd --mode snapshot
 ```
@@ -1776,7 +1496,6 @@ vzdump [vmid] --compress zstd --mode snapshot
 ## Risoluzione Problemi
 
 ### Problemi Comuni
-
 1. Accesso Interfaccia Web
    - Controllare regole firewall
    - Verificare stato servizio pveproxy
@@ -1793,15 +1512,78 @@ vzdump [vmid] --compress zstd --mode snapshot
    - Esaminare log di sistema
 
 ### Posizione Log
-
 - Log Proxmox: /var/log/pve/
 - Log cluster: /var/log/corosync/
 - Log sistema: /var/log/syslog
 - Log sicurezza: /var/log/auth.log
 
 ### Risorse di Supporto
-
 - Documentazione ufficiale: https://pve.proxmox.com/wiki/
 - Forum comunità: https://forum.proxmox.com/
 - Documentazione locale: Disponibile tramite sistema di aiuto dell'interfaccia web
 
+-------------------------------------------------------
+
+### **Analisi della Guida**
+
+#### **Consistenza e Logica**
+
+La guida è ben strutturata e segue una logica chiara nella configurazione automatizzata di Proxmox VE. Tuttavia, ho notato alcuni punti che potrebbero essere migliorati:
+
+1. **Ridondanze nei Controlli**
+   - Vengono eseguiti più controlli per verificare lo stato di Proxmox, della rete e dello storage in diverse sezioni. Alcuni di questi potrebbero essere centralizzati per evitare ripetizioni.
+2. **Errori Logici o Possibili Problemi**
+   - **Verifica Spazio Disco**: Il controllo dello spazio disponibile (`df -BG /`) considera solo la root, mentre Proxmox potrebbe utilizzare volumi LVM o ZFS.
+   - **Download ISO Kali**: Il link della ISO di Kali Linux potrebbe cambiare nel tempo. Sarebbe meglio usare un link sempre aggiornato o consentire all'utente di inserirlo manualmente.
+   - **Gestione LVM**: Il comando `lvconvert --type thin-pool pve/data` assume che esista un volume `pve/data`, ma se l'installazione non ha questa struttura, fallirà. Sarebbe utile un controllo preventivo.
+3. **Possibili Problemi di Sicurezza**
+   - La configurazione SSH disabilita l'accesso root con password, ma non specifica utenti alternativi. Potrebbe causare problemi se la chiave SSH non è configurata correttamente.
+   - L'uso di `iptables` per firewalling è corretto, ma senza `iptables-persistent`, le regole andranno perse al riavvio (anche se viene installato, manca la parte che assicura il salvataggio delle regole).
+   - Il `sysctl` disabilita i redirect ICMP, ma non impedisce ARP spoofing, che potrebbe essere rilevante in reti condivise.
+
+------
+
+### **Cosa Viene Realizzato Dopo Aver Eseguito Tutti Gli Script**
+
+Dopo aver seguito l’intera guida, il sistema Proxmox VE sarà configurato con:
+
+1. **Installazione e Configurazione Base**
+   - Proxmox VE installato e pronto all'uso.
+   - Configurazione automatizzata del sistema con logging centralizzato.
+   - Verifica hardware (RAM, dischi) per assicurare i requisiti minimi.
+2. **Configurazione dello Storage**
+   - Configurazione automatica dello storage locale e remoto.
+   - Creazione di un sistema di backup in `/mnt/backup/`.
+   - Supporto per LVM con ottimizzazioni per pool thin.
+3. **Configurazione della Rete**
+   - Bridge di rete configurati per Management, Storage e VM.
+   - Configurazione automatica degli IP, NAT e firewall.
+   - Regole di QoS e sicurezza applicate.
+4. **Configurazione e Ottimizzazione delle VM**
+   - Creazione automatizzata di un template Kali Linux ottimizzato.
+   - Possibilità di clonare rapidamente VM con rete e storage preconfigurati.
+   - Configurazione SSH e strumenti di diagnostica preinstallati nelle VM.
+5. **Sicurezza Avanzata**
+   - Hardening del kernel con parametri avanzati (`sysctl`).
+   - SSH configurato per autenticazione solo con chiave.
+   - Firewall `iptables` con regole persistenti.
+   - `Fail2ban` per mitigare attacchi brute force su SSH e WebUI.
+6. **Cluster e Alta Disponibilità (Opzionale)**
+   - Configurazione base del cluster Proxmox.
+   - Script di monitoraggio per latenza e carico CPU sui nodi.
+   - Configurazione di fencing per prevenire split-brain.
+7. **Gestione e Automazione**
+   - Script interattivi per creare, gestire e monitorare VM.
+   - Automazione del backup con gestione della retention.
+   - Logging centralizzato con alert per sovraccarichi CPU.
+
+------
+
+### **Miglioramenti Possibili**
+
+- **Rendere più dinamico il download delle ISO** (es. chiedere all'utente di confermare l’URL).
+- **Verifica preventiva di LVM/ZFS** per evitare errori di configurazione.
+- **Implementare regole ARP security nel firewall** per protezione in reti condivise.
+- **Migliorare il logging** con un sistema di alerting remoto (es. integrazione con Grafana o Prometheus).
+
+Nel complesso, la guida è molto solida e copre tutti gli aspetti fondamentali per una configurazione robusta di Proxmox VE. 
