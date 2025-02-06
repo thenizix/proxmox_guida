@@ -11,7 +11,7 @@
 >    - dd (su Linux/Mac)
 > 3. Avvia il server dalla chiavetta USB e segui la procedura di installazione grafica di Proxmox, 
 
-Solo DOPO aver completato questa installazione base di Proxmox potrai avviare queste automazioni dalla CLI di Proxmox
+Solo DOPO aver completato questa installazione base di Proxmox potrai avviare queste automazioni dalla CLI di Proxmox 
 
 
 
@@ -25,8 +25,8 @@ Questo script automatizza la preparazione dell'ambiente di installazione per Pro
 
 ```bash
 #!/bin/bash
-# Script di preparazione per l'installazione di Proxmox VE
-# Questo script verifica i requisiti hardware, identifica il disco di sistema e prepara il partizionamento.
+# Script di configurazione dello storage per Proxmox VE
+# Verifica l'installazione di Proxmox, registra gli storage esistenti e controlla il disco esterno.
 
 # Costanti globali:
 readonly LOG_FILE="/var/log/proxmox-setup.log"  # File di log per tracciare le operazioni
@@ -45,91 +45,69 @@ log() {
     fi
 }
 
+# Verifica se Proxmox è installato
+check_proxmox_installed() {
+    if ! command -v pveversion &> /dev/null; then
+        log "ERROR" "Proxmox VE non risulta installato."
+    fi
+    log "INFO" "Proxmox VE rilevato. Versione: $(pveversion)"
+}
+
 # Funzione analyze_hardware: controlla la RAM installata.
 analyze_hardware() {
-    local total_ram_kb
+    local total_ram_kb total_ram_gb
     total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local total_ram_gb=$(( total_ram_kb / 1024 / 1024 ))
-    if [ "$total_ram_gb" -lt "$MIN_RAM_GB" ]; then
-        log "ERROR" "RAM insufficiente: ${total_ram_gb}GB (minimo richiesto: ${MIN_RAM_GB}GB)"
-    fi
+    total_ram_gb=$(( total_ram_kb / 1024 / 1024 ))
     log "INFO" "RAM disponibile: ${total_ram_gb}GB"
     echo "$total_ram_gb"
 }
 
-# Funzione identify_system_disk: cerca il disco adatto per l'installazione.
-identify_system_disk() {
-    # Vengono elencati i dischi escludendo dispositivi removibili, loop e altri indesiderati.
-    local disks
-    readarray -t disks < <(lsblk -dpno NAME,SIZE,ROTA,TRAN | grep -Ev "usb|loop|sr0" | sort -k4)
+# Funzione per registrare gli storage esistenti in Proxmox
+list_existing_storage() {
+    log "INFO" "Storage registrati su Proxmox:"
+    pvesm status | tee -a "$LOG_FILE"
+}
+
+# Funzione identify_external_disk: individua un disco esterno adatto come storage dati.
+identify_external_disk() {
+    local disks disk_name disk_size disk_gb
+    readarray -t disks < <(lsblk -dpno NAME,SIZE | grep -Ev "usb|loop|sr0")
     for disk in "${disks[@]}"; do
-        local disk_name
         disk_name=$(echo "$disk" | awk '{print $1}')
-        local disk_size
         disk_size=$(blockdev --getsize64 "$disk_name")
-        local disk_gb=$(( disk_size / 1024 / 1024 / 1024 ))
+        disk_gb=$(( disk_size / 1024 / 1024 / 1024 ))
         if [ "$disk_gb" -ge "$MIN_DISK_GB" ]; then
-            log "INFO" "Disco selezionato: $disk_name (${disk_gb}GB)"
+            log "INFO" "Disco esterno rilevato: $disk_name (${disk_gb}GB)"
             echo "$disk_name"
             return 0
         fi
     done
-    log "ERROR" "Nessun disco adatto trovato"
+    log "WARN" "Nessun disco esterno adatto trovato"
 }
 
-# Funzione prepare_installation: prepara il disco per l'installazione creando le partizioni.
-prepare_installation() {
-    local system_disk="$1"
-    local total_ram_gb="$2"
-    if [ -z "$system_disk" ]; then
-        log "ERROR" "Variabile system_disk non valorizzata"
+# Funzione per verificare e configurare lo storage dati
+configure_storage() {
+    local external_disk="$1"
+    if [ -z "$external_disk" ]; then
+        log "WARN" "Nessun disco esterno configurabile trovato."
+        return
     fi
-
-    # Calcola lo swap: metà della RAM, minimo 4GB.
-    local swap_size_gb=$(( total_ram_gb / 2 ))
-    if [ "$swap_size_gb" -lt 4 ]; then
-        swap_size_gb=4
+    
+    local mount_point="/mnt/external_storage"
+    if ! mount | grep -q "$external_disk"; then
+        log "INFO" "Montaggio del disco $external_disk in $mount_point"
+        mkdir -p "$mount_point"
+        mount "$external_disk" "$mount_point"
     fi
-
-    # Avviso all'utente: il disco verrà cancellato.
-    log "WARN" "ATTENZIONE: il disco $system_disk verrà partizionato e tutti i dati andranno persi."
-    read -p "Procedere senza intervento manuale? (yes per continuare): " confirm
-    if [ "$confirm" != "yes" ]; then
-        log "INFO" "Operazione annullata dall'utente."
-        exit 0
-    fi
-
-    log "INFO" "Preparazione disco di sistema: $system_disk"
-    # Crea una tabella GPT sul disco
-    parted -s "$system_disk" mklabel gpt
-
-    # Definisce le dimensioni delle partizioni in MiB:
-    local efi_size=512    # 512MB per EFI
-    local boot_size=1024  # 1GB per /boot
-    local root_size=30720 # 30GB per la partizione root
-    local swap_size_mib=$(( swap_size_gb * 1024 ))
-
-    # Crea le partizioni: ESP, /boot, root, swap.
-    parted -s "$system_disk" \
-        mkpart ESP fat32 1MiB ${efi_size}MiB \
-        mkpart primary ext4 ${efi_size}MiB $((efi_size + boot_size))MiB \
-        mkpart primary ext4 $((efi_size + boot_size))MiB $((efi_size + boot_size + root_size))MiB \
-        mkpart primary linux-swap $((efi_size + boot_size + root_size))MiB $((efi_size + boot_size + root_size + swap_size_mib))MiB \
-        set 1 esp on
-
-    # Formatta le partizioni.
-    mkfs.fat -F32 "${system_disk}1"
-    mkfs.ext4 "${system_disk}2"
-    mkfs.ext4 "${system_disk}3"
-    mkswap "${system_disk}4"
-
-    log "INFO" "Partizioni create e formattate correttamente su $system_disk"
+    log "INFO" "Disco esterno pronto all'uso in $mount_point"
 }
 
 # Esecuzione sequenziale delle funzioni
+check_proxmox_installed
 ram=$(analyze_hardware)
-disk=$(identify_system_disk)
-prepare_installation "$disk" "$ram"
+list_existing_storage
+disk=$(identify_external_disk)
+configure_storage "$disk"
 ```
 
 #### **Perché questo approccio?**
@@ -216,43 +194,80 @@ Questo script configura in maniera automatica la rete di Proxmox VE creando dei 
 ```
 #!/bin/bash
 # Script di configurazione iniziale della rete per Proxmox VE
-# Lo script identifica l'interfaccia fisica principale, estrae l'IP corrente e configura tre bridge:
-# - vmbr0: per la gestione (management)
-# - vmbr1: per lo storage
-# - vmbr2: per le VM, con NAT abilitato
 
-# Costanti di configurazione:
-readonly VLAN_RANGE="2-4094"  # Range di VLAN supportate
-readonly BRIDGE_PREFIX="vmbr" # Prefisso per i nomi dei bridge
-readonly MANAGEMENT_VLAN=1    # VLAN per il management (indicativa)
-readonly STORAGE_VLAN=2       # VLAN per lo storage (indicativa)
-readonly VM_VLAN=3            # VLAN per le VM (indicativa)
+# Funzione di logging per tracciare le operazioni
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
+    if [ "$level" = "ERROR" ]; then
+        exit 1
+    fi
+}
+
+# Funzione per disegnare una linea della tabella
+draw_line() {
+    printf '+%*s+%*s+%*s+%*s+\n' "-20" "" "-15" "" "-15" "" "-25" "" | tr ' ' '-'
+}
+
+# Funzione per visualizzare la riga della tabella
+print_row() {
+    printf "| %-18s | %-13s | %-13s | %-23s |\n" "$1" "$2" "$3" "$4"
+}
+
+# Funzione per mostrare la configurazione di rete
+display_network_config() {
+    local mgmt_ip="$1"
+    local mgmt_prefix="$2"
+    local storage_net="192.168.100.1/24"
+    local vm_net="192.168.200.1/24"
+    
+    echo -e "\nConfigurazione di Rete Proxmox VE"
+    echo "=================================="
+    draw_line
+    print_row "Interfaccia" "Indirizzo IP" "Subnet Mask" "Funzione"
+    draw_line
+    print_row "vmbr0" "$mgmt_ip" "/$mgmt_prefix" "Management & External"
+    print_row "vmbr1" "192.168.100.1" "/24" "Storage Network"
+    print_row "vmbr2" "192.168.200.1" "/24" "VM Network (NAT)"
+    draw_line
+    
+    echo -e "\nDettagli Aggiuntivi:"
+    echo "=================="
+    echo "1. Bridge Management (vmbr0):"
+    echo "   - Interfaccia fisica: enp0s31f6"
+    echo "   - VLAN support: Yes (${VLAN_RANGE})"
+    echo "   - STP: Disabled"
+    
+    echo -e "\n2. Bridge Storage (vmbr1):"
+    echo "   - Tipo: Isolato"
+    echo "   - Range IP: 192.168.100.0/24"
+    echo "   - Gateway: 192.168.100.1"
+    
+    echo -e "\n3. Bridge VM (vmbr2):"
+    echo "   - Tipo: NAT"
+    echo "   - Range IP: 192.168.200.0/24"
+    echo "   - Gateway: 192.168.200.1"
+    echo "   - NAT: Enabled verso vmbr0"
+}
+
+# Costanti di configurazione
+readonly VLAN_RANGE="2-4094"
+readonly BRIDGE_PREFIX="vmbr"
+readonly MANAGEMENT_VLAN=1
+readonly STORAGE_VLAN=2
+readonly VM_VLAN=3
 
 # Funzione per configurare i bridge di rete
 configure_network_bridges() {
-    # Identifica l'interfaccia fisica principale, escludendo quelle virtuali e interfacce di loop.
-    local physical_interface
-    physical_interface=$(ip -o link show | grep -Ev "lo|$BRIDGE_PREFIX|docker|veth" | head -1 | awk -F': ' '{print $2}')
-    if [ -z "$physical_interface" ]; then
-        log "ERROR" "Nessuna interfaccia fisica trovata; verifica la configurazione di rete."
-    fi
+    local physical_interface="enp0s31f6"
+    local current_ip="192.168.1.33"
+    local current_prefix="24"
 
-    # Ottieni la configurazione IP corrente dell'interfaccia selezionata.
-    local current_config
-    current_config=$(ip -4 addr show "$physical_interface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+')
-    if [ -z "$current_config" ]; then
-        log "ERROR" "Impossibile ottenere la configurazione IP per $physical_interface."
-    fi
-    # Separiamo l'indirizzo IP dalla maschera (prefix)
-    local current_ip=${current_config%/*}
-    local current_prefix=${current_config#*/}
-
-    # Calcola indirizzi per i bridge modificando l'ultimo ottetto dell'IP corrente.
-    local management_ip="${current_ip%.*}.1"
-    local storage_ip="${current_ip%.*}.2"
-    local vm_ip="${current_ip%.*}.3"
-
-    # Genera il file di configurazione per /etc/network/interfaces.
+    # Backup existing configuration
+    cp /etc/network/interfaces /etc/network/interfaces.backup
+    
+    # Genera la configurazione di rete
     cat > /etc/network/interfaces << EOL
 auto lo
 iface lo inet loopback
@@ -260,7 +275,7 @@ iface lo inet loopback
 # Bridge principale per management
 auto ${BRIDGE_PREFIX}0
 iface ${BRIDGE_PREFIX}0 inet static
-    address ${management_ip}/${current_prefix}
+    address ${current_ip}/${current_prefix}
     bridge-ports ${physical_interface}
     bridge-stp off
     bridge-fd 0
@@ -270,7 +285,7 @@ iface ${BRIDGE_PREFIX}0 inet static
 # Bridge per storage
 auto ${BRIDGE_PREFIX}1
 iface ${BRIDGE_PREFIX}1 inet static
-    address ${storage_ip}/${current_prefix}
+    address 192.168.100.1/24
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -278,24 +293,28 @@ iface ${BRIDGE_PREFIX}1 inet static
 # Bridge per VM con NAT
 auto ${BRIDGE_PREFIX}2
 iface ${BRIDGE_PREFIX}2 inet static
-    address ${vm_ip}/${current_prefix}
+    address 192.168.200.1/24
     bridge-ports none
     bridge-stp off
     bridge-fd 0
-    # Abilita l'inoltro IP per il NAT
     post-up echo 1 > /proc/sys/net/ipv4/ip_forward
-    # Imposta la regola NAT per il traffico in uscita dalla rete interna
-    post-up iptables -t nat -A POSTROUTING -s "${current_ip%.*}.0/24" -o ${BRIDGE_PREFIX}0 -j MASQUERADE
+    post-up iptables -t nat -A POSTROUTING -s "192.168.200.0/24" -o ${BRIDGE_PREFIX}0 -j MASQUERADE
 EOL
 
-    # Imposta un hostname basato sull'IP, utile per identificare il nodo in rete.
+    # Imposta hostname basato sull'IP
     local hostname="pve-$(echo $current_ip | tr '.' '-')"
     echo "$hostname" > /etc/hostname
 
-    log "INFO" "Configurazione di rete completata per l'interfaccia $physical_interface."
+    log "INFO" "Configurazione di rete completata per l'interfaccia $physical_interface"
+    log "INFO" "Un backup della configurazione precedente è stato salvato in /etc/network/interfaces.backup"
+    
+    # Mostra la tabella di configurazione
+    display_network_config "$current_ip" "$current_prefix"
+    
+    echo -e "\nNota: Per applicare le modifiche, riavviare il sistema o eseguire 'systemctl restart networking'"
 }
 
-# Esecuzione della funzione di configurazione rete.
+# Esecuzione della funzione principale
 configure_network_bridges
 ```
 
