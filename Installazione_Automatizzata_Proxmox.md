@@ -434,220 +434,501 @@ EOL
   - Implementare best practices per la gestione dello storage
   - Integrare con l'ambiente di rete esistente
 
-  ## 3.1 Configurazione Storage Base
 
-  ```bash
-  #!/bin/bash
-  # Nome: configure_storage.sh
-  # Descrizione: Configurazione storage base per Proxmox VE
-  
-  # Costanti di configurazione
-  readonly STORAGE_CONF="/etc/pve/storage.cfg"
-  readonly MIN_STORAGE_SIZE=100  # GB
-  readonly ZFS_MIN_RAM=16        # GB
-  
-  # Funzione di logging
-  log() {
-      local level="$1"
-      local message="$2"
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
-  }
-  
-  # Verifica prerequisiti di base
-  verify_prerequisites() {
-      log "INFO" "Verifica prerequisiti storage"
-      
-      # Verifica rete configurata nel Capitolo 1
-      if ! ip link show vmbr0 >/dev/null 2>&1; then
-          log "ERROR" "Bridge vmbr0 non configurato"
-          exit 1
-      }
-      
-      # Verifica spazio disponibile
-      local root_space
-      root_space=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-      if [ "$root_space" -lt "$MIN_STORAGE_SIZE" ]; then
-          log "ERROR" "Spazio insufficiente: $root_space GB"
-          exit 1
-      }
-  }
-  
-  # Analisi capacità hardware
-  analyze_storage_capabilities() {
-      local total_ram_gb
-      total_ram_gb=$(free -g | awk '/^Mem:/{print $2}')
-      local has_aesni
-      has_aesni=$(grep -c aes /proc/cpuinfo)
-      
-      if [ "$total_ram_gb" -ge "$ZFS_MIN_RAM" ] && [ "$has_aesni" -gt 0 ]; then
-          echo "zfs"
-      else
-          echo "lvm"
-      fi
-  }
-  
-  # Configurazione ZFS
-  configure_zfs_storage() {
-      local disks=("$@")
-      local pool_name="tank"
-      
-      # Installa ZFS
-      apt install -y zfsutils-linux
-      
-      # Determina configurazione RAID
-      local raid_config
-      case ${#disks[@]} in
-          1) raid_config="" ;;
-          2) raid_config="mirror" ;;
-          [3-5]) raid_config="raidz1" ;;
-          *) raid_config="raidz2" ;;
-      esac
-      
-      # Crea e ottimizza pool
-      if [ -n "$raid_config" ]; then
-          zpool create -f "$pool_name" $raid_config "${disks[@]}"
-      else
-          zpool create -f "$pool_name" "${disks[0]}"
-      fi
-      
-      # Ottimizzazioni ZFS
-      zfs set atime=off "$pool_name"
-      zfs set compression=lz4 "$pool_name"
-      zfs set recordsize=128k "$pool_name"
-      
-      # Dataset specifici
-      zfs create "$pool_name/vm-disks"
-      zfs create "$pool_name/ct-disks"
-      zfs create "$pool_name/backup"
-  }
-  
-  # Configurazione LVM
-  configure_lvm_storage() {
-      local disks=("$@")
-      local vg_name="pve_storage"
-      
-      apt install -y lvm2
-      
-      # Prepara dischi
-      for disk in "${disks[@]}"; do
-          sgdisk -Z "$disk"
-          sgdisk -n 1:0:0 "$disk"
-          pvcreate "${disk}1"
-      done
-      
-      # Crea volume group
-      vgcreate "$vg_name" $(for disk in "${disks[@]}"; do echo "${disk}1"; done)
-      
-      # Crea logical volumes
-      lvcreate -l 80%VG -T "$vg_name/vm_storage_pool"
-      lvcreate -l 20%VG -n backup "$vg_name"
-  }
-  
-  # Preparazione template base
-  prepare_template() {
-      local template_id=9000
-      local template_name="ubuntu-template"
-      local iso_url="https://releases.ubuntu.com/jammy/ubuntu-22.04.5-live-server-amd64.iso"
-      
-      # Download ISO
-      wget -O "/var/lib/vz/template/iso/$(basename $iso_url)" "$iso_url"
-      
-      # Crea template
-      qm create $template_id \
-          --name "$template_name" \
-          --memory 2048 \
-          --cores 2 \
-          --net0 "virtio,bridge=vmbr0" \
-          --bootdisk scsi0 \
-          --scsihw virtio-scsi-pci \
-          --scsi0 local-lvm:32 \
-          --ide2 "local:iso/$(basename $iso_url),media=cdrom" \
-          --ostype l26 \
-          --cpu host \
-          --machine q35
-  
-      # Abilita QEMU guest agent
-      qm set $template_id --agent enabled=1
-  }
-  
-  # Main
-  main() {
-      log "INFO" "Avvio configurazione storage"
-      
-      verify_prerequisites
-      local storage_type
-      storage_type=$(analyze_storage_capabilities)
-      
-      # Identifica dischi disponibili
-      readarray -t available_disks < <(lsblk -dpno NAME,SIZE,TYPE | \
-          grep -v "$(mount | grep ' / ' | cut -d' ' -f1 | sed 's/[0-9]*$//')" | \
-          grep "disk")
-      
-      if [ ${#available_disks[@]} -eq 0 ]; then
-          log "ERROR" "Nessun disco disponibile"
-          exit 1
-      }
-      
-      case $storage_type in
-          "zfs") configure_zfs_storage "${available_disks[@]}" ;;
-          "lvm") configure_lvm_storage "${available_disks[@]}" ;;
-      esac
-      
-      prepare_template
-      
-      log "INFO" "Configurazione completata"
-  }
-  
-  main
-  ```
+# Capitolo 3.1: Configurazione Storage e Template Kali Linux
 
-  ## 3.2 Esercizi Pratici
+## Introduzione
 
-  ### Esercizio 1: Gestione Storage
-  1. Verifica lo stato dello storage:
-     ```bash
-     pvesm status
-     ```
-  2. Crea un nuovo volume:
-     ```bash
-     # Per ZFS
-     zfs create tank/test
-     # Per LVM
-     lvcreate -L 10G -n test pve_storage
-     ```
-  3. Monitora le performance:
-     ```bash
-     iostat -x 1
-     ```
+In questo capitolo configureremo lo storage Proxmox e creeremo un template basato su Kali Linux, perfetto per il nostro ambiente di laboratorio isolato. Utilizzeremo la rete isolata (192.168.100.0/24) configurata nel capitolo precedente.
 
-  ### Esercizio 2: Gestione Template
-  1. Clona il template base:
-     ```bash
-     qm clone 9000 101 --name "vm-test"
-     ```
-  2. Personalizza le risorse:
-     ```bash
-     qm set 101 --memory 4096
-     qm set 101 --cores 4
-     ```
-  3. Verifica la configurazione:
-     ```bash
-     qm config 101
-     ```
+## Script di Configurazione Completo
 
-  (non sono riuscito obiettivamente ad attivare copia-incolla nelle finestre dei terminali)
+```bash
+#!/bin/bash
+# =============================================================================
+# Script di Configurazione Proxmox con Kali Linux
+# Versione: 1.0
+#
+# Questo script automatizza:
+# - Configurazione storage Proxmox
+# - Download e verifica Kali Linux
+# - Creazione template ottimizzato
+# - Gestione VM in ambiente isolato
+# =============================================================================
 
-  ## 3.3 Best Practices
+# -----------------------------------------------------------------------------
+# Configurazione Globale
+# -----------------------------------------------------------------------------
+# File di log per tracciare tutte le operazioni
+readonly LOG_FILE="/var/log/proxmox-setup.log"
 
-  1. Mantenere backup regolari della configurazione
-  2. Monitorare l'utilizzo dello storage
-  3. Ottimizzare i template in base all'uso
-  4. Documentare le modifiche
+# Configurazione rete isolata dal capitolo precedente
+readonly NETWORK_BRIDGE="vmbr1"
+readonly NETWORK_SUBNET="192.168.100.0/24"
+readonly NETWORK_GATEWAY="192.168.100.1"
 
-  ### Note Finali
-  - Il tipo di storage (ZFS/LVM) va scelto in base alle risorse
-  - I template vanno aggiornati regolarmente
-  - Monitorare le performance dello storage
+# Configurazione template e ISO
+readonly TEMPLATE_ID=9000
+readonly TEMPLATE_NAME="kali-template"
+readonly KALI_URL="https://old.kali.org/base-images/kali-2024.1/kali-linux-2024.1-installer-amd64.iso"
+readonly KALI_SHA256_URL="https://old.kali.org/base-images/kali-2024.1/SHA256SUMS"
+readonly ISO_FILE="/var/lib/vz/template/iso/kali-linux-2024.1-installer-amd64.iso"
+
+# Requisiti minimi sistema
+readonly MIN_SPACE_GB=50
+
+# Directory necessarie per Proxmox
+readonly STORAGE_PATHS=(
+    "/var/lib/vz/template/iso"     # Directory per le ISO
+    "/var/lib/vz/template/cache"   # Cache per i template
+    "/var/lib/vz/dump"            # Directory per i backup
+    "/mnt/backup"                 # Backup esterni
+)
+
+# -----------------------------------------------------------------------------
+# Funzioni di Utilità
+# -----------------------------------------------------------------------------
+
+# Funzione per logging centralizzato
+# Parametri: 
+# $1 = livello (INFO, WARN, ERROR)
+# $2 = messaggio
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
+    
+    # Termina lo script in caso di errore
+    if [ "$level" = "ERROR" ]; then
+        exit 1
+    fi
+}
+
+# Verifica che tutti i prerequisiti siano soddisfatti
+check_prerequisites() {
+    log "INFO" "Verifica prerequisiti di sistema..."
+
+    # Verifica che lo script sia eseguito come root
+    if [ "$(id -u)" != "0" ]; then
+        log "ERROR" "Questo script richiede privilegi root"
+    fi
+
+    # Verifica presenza comandi necessari
+    local required_commands="pvesm qm pct vgs pvs lvs wget sha256sum"
+    for cmd in $required_commands; do
+        if ! command -v "$cmd" &>/dev/null; then
+            log "ERROR" "Comando $cmd non trovato. Installare il pacchetto necessario."
+        fi
+    done
+}
+
+# Verifica configurazione di rete dal capitolo precedente
+check_network() {
+    log "INFO" "Verifica configurazione di rete..."
+
+    # Verifica presenza bridge
+    if ! ip link show "$NETWORK_BRIDGE" &>/dev/null; then
+        log "ERROR" "Bridge $NETWORK_BRIDGE non trovato. Eseguire prima il capitolo 2."
+    fi
+
+    # Verifica IP forwarding
+    if ! sysctl net.ipv4.ip_forward | grep -q "= 1"; then
+        log "ERROR" "IP forwarding non abilitato. Eseguire prima il capitolo 2."
+    fi
+
+    # Verifica regole NAT
+    if ! iptables -t nat -L | grep -q "MASQUERADE.*$NETWORK_SUBNET"; then
+        log "ERROR" "Regola NAT per rete isolata non trovata. Eseguire prima il capitolo 2."
+    fi
+}
+
+# Verifica spazio disco disponibile
+check_storage() {
+    log "INFO" "Verifica spazio disco..."
+    
+    local available_space=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+    
+    if [ "$available_space" -lt "$MIN_SPACE_GB" ]; then
+        log "ERROR" "Spazio insufficiente: ${available_space}GB (minimo ${MIN_SPACE_GB}GB)"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Configurazione Storage
+# -----------------------------------------------------------------------------
+
+# Configurazione storage base di Proxmox
+configure_storage() {
+    log "INFO" "Configurazione storage base..."
+
+    # Creazione directory con permessi appropriati
+    for path in "${STORAGE_PATHS[@]}"; do
+        mkdir -p "$path"
+        chmod 700 "$path"
+        log "INFO" "Creata directory: $path"
+    done
+
+    # Aggiunta storage backup a Proxmox
+    if ! pvesm status | grep -q "backup"; then
+        pvesm add dir backup --path /mnt/backup --content backup
+        log "INFO" "Storage backup configurato in Proxmox"
+    fi
+
+    # Configurazione LVM se presente
+    configure_lvm
+}
+
+# Configurazione e ottimizzazione LVM
+configure_lvm() {
+    log "INFO" "Configurazione LVM..."
+
+    if vgs | grep -q "pve"; then
+        # Conversione a thin pool se necessario
+        if ! lvs | grep -q "thin"; then
+            lvconvert --type thin-pool pve/data
+        fi
+
+        # Configurazione monitoraggio LVM
+        cat > /etc/lvm/lvm.conf << 'EOL'
+activation {
+    monitoring = 1
+    thin_pool_autoextend_threshold = 80
+    thin_pool_autoextend_percent = 20
+}
+EOL
+
+        systemctl restart lvm2-monitor
+        log "INFO" "LVM configurato e ottimizzato"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Gestione ISO e Template
+# -----------------------------------------------------------------------------
+
+# Download e verifica ISO Kali Linux
+download_kali() {
+    log "INFO" "Download Kali Linux ISO..."
+
+    if [ ! -f "$ISO_FILE" ]; then
+        # Creazione directory se non esiste
+        mkdir -p "$(dirname "$ISO_FILE")"
+        
+        # Download ISO con barra di progresso
+        log "INFO" "Download ISO da $KALI_URL"
+        wget --progress=bar:force -O "$ISO_FILE" "$KALI_URL" || {
+            log "ERROR" "Download ISO fallito"
+            rm -f "$ISO_FILE"
+            return 1
+        }
+
+        # Download checksum
+        log "INFO" "Download checksum da $KALI_SHA256_URL"
+        wget -q -O "/tmp/SHA256SUMS" "$KALI_SHA256_URL" || {
+            log "ERROR" "Download SHA256SUMS fallito"
+            rm -f "$ISO_FILE" "/tmp/SHA256SUMS"
+            return 1
+        }
+
+        # Verifica checksum
+        log "INFO" "Verifica integrità ISO..."
+        local expected_checksum=$(grep "kali-linux-2024.1-installer-amd64.iso" "/tmp/SHA256SUMS" | cut -d' ' -f1)
+        local actual_checksum=$(sha256sum "$ISO_FILE" | cut -d' ' -f1)
+        
+        if [ "$expected_checksum" != "$actual_checksum" ]; then
+            log "ERROR" "Verifica checksum fallita"
+            log "ERROR" "Atteso:   $expected_checksum"
+            log "ERROR" "Ricevuto: $actual_checksum"
+            rm -f "$ISO_FILE" "/tmp/SHA256SUMS"
+            return 1
+        fi
+        
+        log "INFO" "Download e verifica completati con successo"
+        rm -f "/tmp/SHA256SUMS"
+    else
+        log "INFO" "ISO già presente in $(dirname "$ISO_FILE")"
+        log "INFO" "Per forzare un nuovo download, eliminare il file esistente"
+    fi
+}
+
+# Creazione template base Kali
+create_template() {
+    log "INFO" "Creazione template Kali Linux..."
+
+    # Verifica se il template esiste già
+    if qm status $TEMPLATE_ID &>/dev/null; then
+        log "ERROR" "Template $TEMPLATE_ID già esistente"
+    fi
+
+    # Creazione VM template con parametri ottimizzati per Kali
+    qm create $TEMPLATE_ID \
+        --memory 4096 \
+        --cores 2 \
+        --name "$TEMPLATE_NAME" \
+        --net0 "virtio,bridge=$NETWORK_BRIDGE" \
+        --bootdisk scsi0 \
+        --scsihw virtio-scsi-pci \
+        --scsi0 "local-lvm:50" \
+        --ostype "l26" \
+        --tablet 1 \
+        --machine q35 \
+        --agent 1 \
+        --cpu host \
+        --numa 1
+
+    # Preparazione rete template
+    prepare_template_network
+
+    log "INFO" "Template base creato con successo"
+}
+
+# Configurazione rete per il template
+prepare_template_network() {
+    cat > /tmp/netplan-template.yaml << EOL
+network:
+  version: 2
+  ethernets:
+    ens18:
+      dhcp4: false
+      addresses: [192.168.100.2/24]
+      routes:
+        - to: default
+          via: 192.168.100.1
+      nameservers:
+        addresses: [8.8.8.8]
+EOL
+}
+
+# Ottimizzazione template con strumenti Kali
+optimize_template() {
+    log "INFO" "Ottimizzazione template Kali..."
+
+    # Configurazione base template
+    qm set $TEMPLATE_ID --delete ide2
+    qm set $TEMPLATE_ID --boot c --bootdisk scsi0
+    qm set $TEMPLATE_ID --keyboard it
+
+    # Script di ottimizzazione per l'OS guest
+    cat > /tmp/optimize-kali.sh << 'EOL'
+#!/bin/bash
+# Aggiornamento sistema
+apt update
+apt full-upgrade -y
+
+# Installazione strumenti essenziali
+apt install -y qemu-guest-agent \
+    kali-linux-default \
+    openssh-server \
+    htop \
+    iftop \
+    tmux
+
+# Configurazione servizi
+systemctl enable qemu-guest-agent
+systemctl enable ssh
+
+# Configurazione sicurezza base
+echo "root:kali" | chpasswd
+sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+EOL
+
+    log "INFO" "Template ottimizzato con strumenti Kali"
+}
+
+# -----------------------------------------------------------------------------
+# Gestione VM
+# -----------------------------------------------------------------------------
+
+# Creazione VM da template
+create_vm() {
+    local vm_id="$1"
+    local vm_name="$2"
+    local memory="${3:-8192}"  # Default 8GB per Kali
+
+    # Validazione parametri
+    if [ -z "$vm_id" ] || [ -z "$vm_name" ]; then
+        log "ERROR" "Specificare VM ID e nome"
+    fi
+
+    # Verifica range ID valido
+    if [ "$vm_id" -lt 101 ] || [ "$vm_id" -gt 199 ]; then
+        log "ERROR" "VM ID deve essere tra 101 e 199"
+    fi
+
+    log "INFO" "Creazione VM Kali $vm_name (ID: $vm_id)..."
+
+    # Clonazione e configurazione
+    qm clone $TEMPLATE_ID $vm_id --name "$vm_name" --full
+    qm set $vm_id --memory "$memory"
+    qm set $vm_id --net0 "virtio,bridge=$NETWORK_BRIDGE"
+
+    # Configurazione IP basato su ID
+    local vm_ip="192.168.100.$vm_id"
+    configure_vm_network $vm_id "$vm_ip"
+
+    log "INFO" "VM $vm_name creata con IP $vm_ip"
+}
+
+# Configurazione rete VM
+configure_vm_network() {
+    local vm_id="$1"
+    local vm_ip="$2"
+
+    cat > /tmp/netplan-vm.yaml << EOL
+network:
+  version: 2
+  ethernets:
+    ens18:
+      dhcp4: false
+      addresses: [$vm_ip/24]
+      routes:
+        - to: default
+          via: $NETWORK_GATEWAY
+      nameservers:
+        addresses: [8.8.8.8]
+EOL
+}
+
+# -----------------------------------------------------------------------------
+# Menu Interattivo
+# -----------------------------------------------------------------------------
+
+show_menu() {
+    while true; do
+        echo -e "\n=== Configurazione Storage e Template Kali Linux ==="
+        echo "1. Verifica Ambiente"
+        echo "2. Configura Storage"
+        echo "3. Scarica ISO Kali"
+        echo "4. Crea Template Kali"
+        echo "5. Ottimizza Template"
+        echo "6. Crea VM Kali"
+        echo "7. Esci"
+        
+        read -p "Scelta: " choice
+        
+        case "$choice" in
+            1)
+                check_prerequisites
+                check_network
+                check_storage
+                ;;
+            2)
+                configure_storage
+                ;;
+            3)
+                download_kali
+                ;;
+            4)
+                create_template
+                ;;
+            5)
+                optimize_template
+                ;;
+            6)
+                read -p "VM ID (101-199): " vm_id
+                read -p "VM Nome: " vm_name
+                read -p "RAM (MB) [8192]: " vm_ram
+                create_vm "$vm_id" "$vm_name" "${vm_ram:-8192}"
+                ;;
+            7)
+                log "INFO" "Uscita..."
+                exit 0
+                ;;
+            *)
+                echo "Scelta non valida"
+                ;;
+        esac
+    done
+}
+
+# -----------------------------------------------------------------------------
+# Funzione Principale
+# -----------------------------------------------------------------------------
+
+main() {
+    log "INFO" "Avvio configurazione Proxmox con Kali Linux..."
+    
+    # Verifiche iniziali
+    check_prerequisites
+    check_network
+    check_storage
+    
+    # Avvio menu interattivo
+    show_menu
+}
+
+# Avvio script
+main
+```
+
+## Utilizzo dello Script
+
+1. Salvare lo script come `proxmox-kali-setup.sh`
+2. Rendere lo script eseguibile:
+```bash
+chmod +x proxmox-kali-setup.sh
+```
+3. Eseguire come root:
+```bash
+./proxmox-kali-setup.sh
+```
+
+## Note Importanti
+
+1. **Modifiche per Kali Linux:**
+   - Aumentata RAM predefinita a 8GB
+   - Aumentato spazio disco a 50GB
+   - Aggiunti strumenti Kali essenziali
+   - Configurato SSH per accesso root
+
+2. **Rete Isolata:**
+   - Tutte le VM sulla rete 192.168.100.0/24
+   - Template usa 192.168.100.2
+   - VM usano IP basati su ID (101-199)
+
+3. **Storage:**
+   - Struttura ottimizzata per laboratorio
+   - Backup configurato
+   - Monitoraggio LVM attivo
+
+4. **Sicurezza:**
+   - Password root template: "kali"
+   - SSH abilitato per accesso remoto
+   - Rete completamente isolata
+
+## Prossimi Passi
+
+- Personalizzazione strumenti Kali
+- Configurazione backup
+- Hardening sicurezza
+- Configurazione VPN per accesso remoto
+
+## Troubleshooting
+
+1. **Problemi Download:**
+   ```bash
+   # Verifica download manuale
+   wget https://cdimage.kali.org/kali-2024.1/kali-linux-2024.1-installer-amd64.iso
+   ```
+
+2. **Problemi Template:**
+   ```bash
+   # Verifica stato template
+   qm status 9000
+   ```
+
+3. **Problemi Rete:**
+   ```bash
+   # Verifica bridge
+   ip a show vmbr1
+   ```
+
+4. **Log Proxmox:**
+   ```bash
+   # Consulta log
+   tail -f /var/log/proxmox-setup.log
+   ```
 
 ------
 
