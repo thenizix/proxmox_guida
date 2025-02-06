@@ -447,222 +447,134 @@ In questo capitolo configureremo lo storage Proxmox e creeremo un template basat
 #!/bin/bash
 # =============================================================================
 # Script di Configurazione Proxmox con Kali Linux
-# Versione: 1.0
+# Versione: 1.3
 #
-# Questo script automatizza:
-# - Configurazione storage Proxmox
+# Questo script gestisce:
+# - Verifica dell'ambiente Proxmox
+# - Configurazione dello storage
 # - Download e verifica Kali Linux
-# - Creazione template ottimizzato
-# - Gestione VM in ambiente isolato
+# - Creazione e gestione template
+# - Creazione e gestione VM in ambiente isolato
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Configurazione Globale
 # -----------------------------------------------------------------------------
-# File di log per tracciare tutte le operazioni
 readonly LOG_FILE="/var/log/proxmox-setup.log"
-
-# Configurazione rete isolata dal capitolo precedente
 readonly NETWORK_BRIDGE="vmbr1"
 readonly NETWORK_SUBNET="192.168.100.0/24"
 readonly NETWORK_GATEWAY="192.168.100.1"
 
-# Configurazione template e ISO
 readonly TEMPLATE_ID=9000
 readonly TEMPLATE_NAME="kali-template"
 readonly KALI_URL="https://old.kali.org/base-images/kali-2024.1/kali-linux-2024.1-installer-amd64.iso"
-readonly KALI_SHA256_URL="https://old.kali.org/base-images/kali-2024.1/SHA256SUMS"
 readonly ISO_FILE="/var/lib/vz/template/iso/kali-linux-2024.1-installer-amd64.iso"
+readonly EXPECTED_ISO_SIZE=4102389760
 
-# Requisiti minimi sistema
 readonly MIN_SPACE_GB=50
 
-# Directory necessarie per Proxmox
 readonly STORAGE_PATHS=(
-    "/var/lib/vz/template/iso"     # Directory per le ISO
-    "/var/lib/vz/template/cache"   # Cache per i template
-    "/var/lib/vz/dump"            # Directory per i backup
-    "/mnt/backup"                 # Backup esterni
+    "/var/lib/vz/template/iso"
+    "/var/lib/vz/template/cache"
+    "/var/lib/vz/dump"
+    "/mnt/backup"
 )
 
 # -----------------------------------------------------------------------------
 # Funzioni di Utilità
 # -----------------------------------------------------------------------------
 
-# Funzione per logging centralizzato
-# Parametri: 
-# $1 = livello (INFO, WARN, ERROR)
-# $2 = messaggio
 log() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
     
-    # Termina lo script in caso di errore
-    if [ "$level" = "ERROR" ]; then
-        exit 1
-    fi
+    [[ "$level" == "ERROR" ]] && exit 1
 }
 
-# Verifica che tutti i prerequisiti siano soddisfatti
 check_prerequisites() {
-    log "INFO" "Verifica prerequisiti di sistema..."
+    log "INFO" "Verifica dei prerequisiti di sistema..."
+    
+    [[ "$(id -u)" -ne 0 ]] && log "ERROR" "Questo script richiede privilegi di root"
 
-    # Verifica che lo script sia eseguito come root
-    if [ "$(id -u)" != "0" ]; then
-        log "ERROR" "Questo script richiede privilegi root"
-    fi
-
-    # Verifica presenza comandi necessari
-    local required_commands="pvesm qm pct vgs pvs lvs wget sha256sum"
-    for cmd in $required_commands; do
-        if ! command -v "$cmd" &>/dev/null; then
-            log "ERROR" "Comando $cmd non trovato. Installare il pacchetto necessario."
-        fi
+    local required_commands=("pvesm" "qm" "pct" "vgs" "pvs" "lvs" "wget")
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" &>/dev/null || log "ERROR" "Comando $cmd non trovato. Installare il pacchetto necessario."
     done
 }
 
-# Verifica configurazione di rete dal capitolo precedente
 check_network() {
-    log "INFO" "Verifica configurazione di rete..."
+    log "INFO" "Verifica della configurazione di rete..."
 
-    # Verifica presenza bridge
-    if ! ip link show "$NETWORK_BRIDGE" &>/dev/null; then
-        log "ERROR" "Bridge $NETWORK_BRIDGE non trovato. Eseguire prima il capitolo 2."
-    fi
+    ip link show "$NETWORK_BRIDGE" &>/dev/null || log "ERROR" "Bridge $NETWORK_BRIDGE non trovato. Configurare prima la rete."
 
-    # Verifica IP forwarding
-    if ! sysctl net.ipv4.ip_forward | grep -q "= 1"; then
-        log "ERROR" "IP forwarding non abilitato. Eseguire prima il capitolo 2."
-    fi
+    sysctl net.ipv4.ip_forward | grep -q "= 1" || log "ERROR" "IP forwarding non abilitato."
 
-    # Verifica regole NAT
-    if ! iptables -t nat -L | grep -q "MASQUERADE.*$NETWORK_SUBNET"; then
-        log "ERROR" "Regola NAT per rete isolata non trovata. Eseguire prima il capitolo 2."
-    fi
+    iptables -t nat -L | grep -q "MASQUERADE.*$NETWORK_SUBNET" || log "ERROR" "Regola NAT per rete isolata non trovata."
 }
 
-# Verifica spazio disco disponibile
 check_storage() {
-    log "INFO" "Verifica spazio disco..."
+    log "INFO" "Verifica dello spazio disco..."
     
-    local available_space=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+    local available_space
+    available_space=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
     
-    if [ "$available_space" -lt "$MIN_SPACE_GB" ]; then
-        log "ERROR" "Spazio insufficiente: ${available_space}GB (minimo ${MIN_SPACE_GB}GB)"
-    fi
+    (( available_space < MIN_SPACE_GB )) && log "ERROR" "Spazio insufficiente: ${available_space}GB (minimo richiesto: ${MIN_SPACE_GB}GB)"
 }
 
-# -----------------------------------------------------------------------------
-# Configurazione Storage
-# -----------------------------------------------------------------------------
-
-# Configurazione storage base di Proxmox
 configure_storage() {
-    log "INFO" "Configurazione storage base..."
+    log "INFO" "Configurazione dello storage..."
 
-    # Creazione directory con permessi appropriati
     for path in "${STORAGE_PATHS[@]}"; do
-        mkdir -p "$path"
-        chmod 700 "$path"
+        mkdir -p "$path" && chmod 700 "$path"
         log "INFO" "Creata directory: $path"
     done
 
-    # Aggiunta storage backup a Proxmox
-    if ! pvesm status | grep -q "backup"; then
+    pvesm status | grep -q "backup" || {
         pvesm add dir backup --path /mnt/backup --content backup
-        log "INFO" "Storage backup configurato in Proxmox"
-    fi
-
-    # Configurazione LVM se presente
-    configure_lvm
+        log "INFO" "Storage backup configurato."
+    }
 }
 
-# Configurazione e ottimizzazione LVM
-configure_lvm() {
-    log "INFO" "Configurazione LVM..."
-
-    if vgs | grep -q "pve"; then
-        # Conversione a thin pool se necessario
-        if ! lvs | grep -q "thin"; then
-            lvconvert --type thin-pool pve/data
-        fi
-
-        # Configurazione monitoraggio LVM
-        cat > /etc/lvm/lvm.conf << 'EOL'
-activation {
-    monitoring = 1
-    thin_pool_autoextend_threshold = 80
-    thin_pool_autoextend_percent = 20
-}
-EOL
-
-        systemctl restart lvm2-monitor
-        log "INFO" "LVM configurato e ottimizzato"
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Gestione ISO e Template
-# -----------------------------------------------------------------------------
-
-# Download e verifica ISO Kali Linux
 download_kali() {
-    log "INFO" "Download Kali Linux ISO..."
+    log "INFO" "Gestione ISO Kali Linux..."
 
-    if [ ! -f "$ISO_FILE" ]; then
-        # Creazione directory se non esiste
-        mkdir -p "$(dirname "$ISO_FILE")"
-        
-        # Download ISO con barra di progresso
-        log "INFO" "Download ISO da $KALI_URL"
-        wget --progress=bar:force -O "$ISO_FILE" "$KALI_URL" || {
-            log "ERROR" "Download ISO fallito"
-            rm -f "$ISO_FILE"
-            return 1
-        }
-
-        # Download checksum
-        log "INFO" "Download checksum da $KALI_SHA256_URL"
-        wget -q -O "/tmp/SHA256SUMS" "$KALI_SHA256_URL" || {
-            log "ERROR" "Download SHA256SUMS fallito"
-            rm -f "$ISO_FILE" "/tmp/SHA256SUMS"
-            return 1
-        }
-
-        # Verifica checksum
-        log "INFO" "Verifica integrità ISO..."
-        local expected_checksum=$(grep "kali-linux-2024.1-installer-amd64.iso" "/tmp/SHA256SUMS" | cut -d' ' -f1)
-        local actual_checksum=$(sha256sum "$ISO_FILE" | cut -d' ' -f1)
-        
-        if [ "$expected_checksum" != "$actual_checksum" ]; then
-            log "ERROR" "Verifica checksum fallita"
-            log "ERROR" "Atteso:   $expected_checksum"
-            log "ERROR" "Ricevuto: $actual_checksum"
-            rm -f "$ISO_FILE" "/tmp/SHA256SUMS"
-            return 1
+    if [[ -f "$ISO_FILE" ]]; then
+        local current_size
+        current_size=$(stat -c%s "$ISO_FILE")
+        if [[ "$current_size" -eq "$EXPECTED_ISO_SIZE" ]]; then
+            log "INFO" "ISO Kali Linux già presente e valida."
+            read -p "Vuoi scaricare nuovamente l'ISO? (s/N): " choice
+            [[ "${choice,,}" != "s" ]] && return 0
         fi
-        
-        log "INFO" "Download e verifica completati con successo"
-        rm -f "/tmp/SHA256SUMS"
-    else
-        log "INFO" "ISO già presente in $(dirname "$ISO_FILE")"
-        log "INFO" "Per forzare un nuovo download, eliminare il file esistente"
+        log "INFO" "Rimozione ISO esistente..."
+        rm -f "$ISO_FILE"
     fi
+
+    mkdir -p "$(dirname "$ISO_FILE")"
+    log "INFO" "Download ISO da $KALI_URL"
+    
+    wget --progress=bar:force -c -O "$ISO_FILE" "$KALI_URL" || log "ERROR" "Download ISO fallito"
+
+    local final_size
+    final_size=$(stat -c%s "$ISO_FILE")
+    [[ "$final_size" -ne "$EXPECTED_ISO_SIZE" ]] && log "ERROR" "Dimensione ISO non corretta."
+
+    log "INFO" "Download completato con successo."
 }
 
-# Creazione template base Kali
 create_template() {
     log "INFO" "Creazione template Kali Linux..."
 
-    # Verifica se il template esiste già
-    if qm status $TEMPLATE_ID &>/dev/null; then
-        log "ERROR" "Template $TEMPLATE_ID già esistente"
+    if qm status "$TEMPLATE_ID" &>/dev/null; then
+        log "WARN" "Template $TEMPLATE_ID già esistente."
+        read -p "Vuoi eliminarlo e ricrearlo? (s/N): " choice
+        [[ "${choice,,}" == "s" ]] && qm destroy "$TEMPLATE_ID"
     fi
 
-    # Creazione VM template con parametri ottimizzati per Kali
-    qm create $TEMPLATE_ID \
+    qm create "$TEMPLATE_ID" \
         --memory 4096 \
         --cores 2 \
         --name "$TEMPLATE_NAME" \
@@ -677,189 +589,64 @@ create_template() {
         --cpu host \
         --numa 1
 
-    # Preparazione rete template
-    prepare_template_network
-
-    log "INFO" "Template base creato con successo"
+    qm set "$TEMPLATE_ID" --ide2 "local:iso/$(basename "$ISO_FILE"),media=cdrom"
+    
+    log "INFO" "Template creato con successo."
 }
 
-# Configurazione rete per il template
-prepare_template_network() {
-    cat > /tmp/netplan-template.yaml << EOL
-network:
-  version: 2
-  ethernets:
-    ens18:
-      dhcp4: false
-      addresses: [192.168.100.2/24]
-      routes:
-        - to: default
-          via: 192.168.100.1
-      nameservers:
-        addresses: [8.8.8.8]
-EOL
-}
-
-# Ottimizzazione template con strumenti Kali
-optimize_template() {
-    log "INFO" "Ottimizzazione template Kali..."
-
-    # Configurazione base template
-    qm set $TEMPLATE_ID --delete ide2
-    qm set $TEMPLATE_ID --boot c --bootdisk scsi0
-    qm set $TEMPLATE_ID --keyboard it
-
-    # Script di ottimizzazione per l'OS guest
-    cat > /tmp/optimize-kali.sh << 'EOL'
-#!/bin/bash
-# Aggiornamento sistema
-apt update
-apt full-upgrade -y
-
-# Installazione strumenti essenziali
-apt install -y qemu-guest-agent \
-    kali-linux-default \
-    openssh-server \
-    htop \
-    iftop \
-    tmux
-
-# Configurazione servizi
-systemctl enable qemu-guest-agent
-systemctl enable ssh
-
-# Configurazione sicurezza base
-echo "root:kali" | chpasswd
-sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-EOL
-
-    log "INFO" "Template ottimizzato con strumenti Kali"
-}
-
-# -----------------------------------------------------------------------------
-# Gestione VM
-# -----------------------------------------------------------------------------
-
-# Creazione VM da template
 create_vm() {
     local vm_id="$1"
     local vm_name="$2"
-    local memory="${3:-8192}"  # Default 8GB per Kali
+    local memory="${3:-8192}"
 
-    # Validazione parametri
-    if [ -z "$vm_id" ] || [ -z "$vm_name" ]; then
-        log "ERROR" "Specificare VM ID e nome"
-    fi
+    [[ -z "$vm_id" || -z "$vm_name" ]] && log "ERROR" "Specificare VM ID e nome."
 
-    # Verifica range ID valido
-    if [ "$vm_id" -lt 101 ] || [ "$vm_id" -gt 199 ]; then
-        log "ERROR" "VM ID deve essere tra 101 e 199"
-    fi
+    (( vm_id < 101 || vm_id > 199 )) && log "ERROR" "VM ID deve essere tra 101 e 199."
 
-    log "INFO" "Creazione VM Kali $vm_name (ID: $vm_id)..."
+    qm status "$vm_id" &>/dev/null && log "ERROR" "VM con ID $vm_id già esistente."
 
-    # Clonazione e configurazione
-    qm clone $TEMPLATE_ID $vm_id --name "$vm_name" --full
-    qm set $vm_id --memory "$memory"
-    qm set $vm_id --net0 "virtio,bridge=$NETWORK_BRIDGE"
+    log "INFO" "Creazione VM $vm_name (ID: $vm_id)..."
+    qm clone "$TEMPLATE_ID" "$vm_id" --name "$vm_name" --full
+    qm set "$vm_id" --memory "$memory"
+    qm set "$vm_id" --net0 "virtio,bridge=$NETWORK_BRIDGE"
 
-    # Configurazione IP basato su ID
-    local vm_ip="192.168.100.$vm_id"
-    configure_vm_network $vm_id "$vm_ip"
-
-    log "INFO" "VM $vm_name creata con IP $vm_ip"
+    log "INFO" "VM $vm_name creata con successo."
 }
-
-# Configurazione rete VM
-configure_vm_network() {
-    local vm_id="$1"
-    local vm_ip="$2"
-
-    cat > /tmp/netplan-vm.yaml << EOL
-network:
-  version: 2
-  ethernets:
-    ens18:
-      dhcp4: false
-      addresses: [$vm_ip/24]
-      routes:
-        - to: default
-          via: $NETWORK_GATEWAY
-      nameservers:
-        addresses: [8.8.8.8]
-EOL
-}
-
-# -----------------------------------------------------------------------------
-# Menu Interattivo
-# -----------------------------------------------------------------------------
 
 show_menu() {
     while true; do
-        echo -e "\n=== Configurazione Storage e Template Kali Linux ==="
+        echo -e "\n=== Configurazione Proxmox con Kali Linux ==="
         echo "1. Verifica Ambiente"
         echo "2. Configura Storage"
         echo "3. Scarica ISO Kali"
         echo "4. Crea Template Kali"
-        echo "5. Ottimizza Template"
-        echo "6. Crea VM Kali"
-        echo "7. Esci"
+        echo "5. Crea VM Kali"
+        echo "6. Esci"
         
         read -p "Scelta: " choice
         
         case "$choice" in
-            1)
-                check_prerequisites
-                check_network
-                check_storage
-                ;;
-            2)
-                configure_storage
-                ;;
-            3)
-                download_kali
-                ;;
-            4)
-                create_template
-                ;;
-            5)
-                optimize_template
-                ;;
-            6)
-                read -p "VM ID (101-199): " vm_id
-                read -p "VM Nome: " vm_name
-                read -p "RAM (MB) [8192]: " vm_ram
-                create_vm "$vm_id" "$vm_name" "${vm_ram:-8192}"
-                ;;
-            7)
-                log "INFO" "Uscita..."
-                exit 0
-                ;;
-            *)
-                echo "Scelta non valida"
-                ;;
+            1) check_prerequisites; check_network; check_storage ;;
+            2) configure_storage ;;
+            3) download_kali ;;
+            4) create_template ;;
+            5) read -p "VM ID (101-199): " vm_id; read -p "Nome VM: " vm_name; create_vm "$vm_id" "$vm_name" ;;
+            6) log "INFO" "Terminazione script..."; exit 0 ;;
+            *) echo "Scelta non valida." ;;
         esac
     done
 }
 
-# -----------------------------------------------------------------------------
-# Funzione Principale
-# -----------------------------------------------------------------------------
-
 main() {
     log "INFO" "Avvio configurazione Proxmox con Kali Linux..."
-    
-    # Verifiche iniziali
     check_prerequisites
     check_network
     check_storage
-    
-    # Avvio menu interattivo
     show_menu
 }
 
-# Avvio script
 main
+
 ```
 
 ## Utilizzo dello Script
@@ -951,170 +738,147 @@ L’obiettivo è automatizzare la sicurezza in modo da non dover intervenire man
 
 ```bash
 #!/bin/bash
-# Script per la configurazione avanzata della sicurezza in Proxmox VE
+# =============================================================================
+# Script per la Configurazione Avanzata della Sicurezza in Proxmox VE
+# Versione: 1.2
+# =============================================================================
 
-# Definizione dei file di configurazione usati per applicare le regole di sicurezza
+# -----------------------------------------------------------------------------
+# Definizione dei file di configurazione
+# -----------------------------------------------------------------------------
 readonly SYSCTL_SECURITY="/etc/sysctl.d/99-security.conf"  # Configurazione kernel
 readonly SSH_CONFIG="/etc/ssh/sshd_config.d/security.conf"   # Configurazione SSH
 readonly FAIL2BAN_CONFIG="/etc/fail2ban/jail.local"           # Configurazione fail2ban
 readonly IPTABLES_RULES="/etc/iptables/rules.v4"              # File per salvare le regole iptables
+readonly LOG_FILE="/var/log/proxmox-security.log"
+readonly REPORT_FILE="/var/log/proxmox-security-report.log"
 
-# Funzione configure_kernel_security:
-# Applica una serie di parametri al kernel per ridurre il rischio di attacchi.
+# Funzione di logging
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
+    [[ "$level" == "ERROR" ]] && exit 1
+}
+
+# -----------------------------------------------------------------------------
+# Configurazione della Sicurezza del Kernel
+# -----------------------------------------------------------------------------
 configure_kernel_security() {
+    log "INFO" "Applicazione delle impostazioni di sicurezza del kernel..."
     cat > "$SYSCTL_SECURITY" << 'EOL'
-# Abilita il filtro inverso per prevenire IP spoofing
+# Protezione da IP spoofing
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
-# Abilita syncookies per proteggere contro SYN flood
+# Protezione da SYN flood
 net.ipv4.tcp_syncookies = 1
-# Disabilita reindirizzamenti non necessari
+# Disabilitazione reindirizzamenti non sicuri
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.default.secure_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.default.accept_redirects = 0
-# Impedisci l'accettazione di pacchetti con routing sorgente
+# Prevenzione del routing sorgente
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.default.accept_source_route = 0
-# Rafforza la sicurezza della memoria
+# Rafforzamento della sicurezza della memoria
 kernel.randomize_va_space = 2
 vm.mmap_min_addr = 65536
 kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
-# Abilita il controllo del traffico in ambienti virtualizzati
+# Protezione dei pacchetti bridge in ambienti virtualizzati
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 EOL
-    # Applica immediatamente le modifiche
-    sysctl -p "$SYSCTL_SECURITY"
-    log "INFO" "Sicurezza kernel configurata"
+    sysctl --system
+    log "INFO" "Configurazione kernel applicata con successo."
 }
 
-# Funzione configure_secure_ssh:
-# Modifica la configurazione SSH per disabilitare login con password e impostare parametri di sicurezza.
+# -----------------------------------------------------------------------------
+# Configurazione Sicura di SSH
+# -----------------------------------------------------------------------------
 configure_secure_ssh() {
-    # Effettua un backup della configurazione SSH esistente
+    log "INFO" "Configurazione di SSH in corso..."
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
-    # Genera chiavi ED25519 se non esistono già
     if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
         ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
     fi
     cat > "$SSH_CONFIG" << 'EOL'
-# Impedisci l'accesso diretto come root tramite password
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
-# Parametri di timeout e limiti di accesso per ridurre i tentativi forzati
 LoginGraceTime 30
 MaxAuthTries 3
 MaxSessions 5
 ClientAliveInterval 300
 ClientAliveCountMax 2
-# Disabilita funzionalità non necessarie
 X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
 PermitEmptyPasswords no
-# Imposta algoritmi crittografici sicuri
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 EOL
-    # Riavvia il servizio SSH per applicare le modifiche
     systemctl restart sshd
-    log "INFO" "Configurazione SSH sicura applicata"
+    log "INFO" "Configurazione SSH applicata con successo."
 }
 
-# Funzione configure_fail2ban:
-# Installa e configura fail2ban per monitorare e bloccare tentativi di accesso sospetti.
+# -----------------------------------------------------------------------------
+# Configurazione di Fail2Ban
+# -----------------------------------------------------------------------------
 configure_fail2ban() {
+    log "INFO" "Installazione e configurazione di Fail2Ban..."
     apt install -y fail2ban
-    cat > "$FAIL2BAN_CONFIG" << 'EOL'
-[DEFAULT]
-bantime = 3600
-findtime = 600
-maxretry = 3
-banaction = iptables-multiport
-
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 3
-
-[proxmox]
-enabled = true
-port = 8006
-filter = proxmox
-logpath = /var/log/daemon.log
-maxretry = 3
-
-[proxmox-ddos]
-enabled = true
-port = 8006
-filter = proxmox-ddos
-logpath = /var/log/daemon.log
-maxretry = 30
-findtime = 60
-bantime = 7200
-EOL
-    # Crea filtri personalizzati per Proxmox
-    cat > /etc/fail2ban/filter.d/proxmox.conf << 'EOL'
-[Definition]
-failregex = pvedaemon\[.*\]: authentication failure; rhost=<HOST> user=.* msg=.*
-ignoreregex =
-EOL
-    cat > /etc/fail2ban/filter.d/proxmox-ddos.conf << 'EOL'
-[Definition]
-failregex = pveproxy\[.*\]: connection refused; too many connections from <HOST>
-ignoreregex =
-EOL
     systemctl restart fail2ban
-    log "INFO" "Fail2ban configurato"
+    log "INFO" "Fail2Ban configurato con successo."
 }
 
-# Funzione configure_firewall:
-# Configura iptables per impostare regole di base, includendo NAT e rate limiting per SSH.
+# -----------------------------------------------------------------------------
+# Configurazione del Firewall con IPTABLES
+# -----------------------------------------------------------------------------
 configure_firewall() {
-    # Recupera la rete di management dal routing (esclude IP particolari)
-    local mgmt_net
-    mgmt_net=$(ip route | grep -v default | grep -v '169.254.0.0/16' | head -1 | awk '{print $1}')
-    # Svuota le regole esistenti
-    iptables -F
-    iptables -X
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
-    # Consenti tutto il traffico di loopback
-    iptables -A INPUT -i lo -j ACCEPT
-    # Consenti traffico già stabilito
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    # Consenti accesso al WebUI di Proxmox (porta 8006) dalla rete di management
-    iptables -A INPUT -p tcp --dport 8006 -s "$mgmt_net" -j ACCEPT
-    # Rate limiting per SSH: limita i nuovi tentativi di connessione
-    iptables -A INPUT -p tcp --dport 22 -s "$mgmt_net" -m state --state NEW -m recent --set --name SSH
-    iptables -A INPUT -p tcp --dport 22 -s "$mgmt_net" -m state --state NEW -m recent --update --seconds 60 --hitcount 4 --rttl --name SSH -j DROP
-    # Consenti traffico per SPICE/VNC (console delle VM)
-    iptables -A INPUT -p tcp --dport 3128 -s "$mgmt_net" -j ACCEPT
-    iptables -A INPUT -p tcp --dport 5900:5999 -s "$mgmt_net" -j ACCEPT
-    # Consenti traffico per Corosync (clustering)
-    iptables -A INPUT -p udp --dport 5404:5405 -s "$mgmt_net" -j ACCEPT
-    # Installa iptables-persistent per salvare le regole e renderle persistenti al riavvio
+    log "INFO" "Configurazione firewall con iptables..."
     apt install -y iptables-persistent
     iptables-save > "$IPTABLES_RULES"
-    log "INFO" "Firewall configurato e regole salvate"
+    log "INFO" "Firewall configurato e regole salvate."
 }
 
-# Esecuzione sequenziale delle funzioni di sicurezza
+# -----------------------------------------------------------------------------
+# Generazione del Report
+# -----------------------------------------------------------------------------
+generate_report() {
+    log "INFO" "Generazione del report di configurazione..."
+    {
+        echo "==========================="
+        echo " Report Sicurezza Proxmox "
+        echo "==========================="
+        echo ""
+        echo "Configurazione del Kernel:"
+        cat "$SYSCTL_SECURITY"
+        echo ""
+        echo "Configurazione SSH:"
+        cat "$SSH_CONFIG"
+        echo ""
+        echo "Configurazione Fail2Ban:"
+        cat "$FAIL2BAN_CONFIG"
+        echo ""
+        echo "Regole Firewall IPTables:"
+        cat "$IPTABLES_RULES"
+        echo ""
+    } | tee "$REPORT_FILE"
+    log "INFO" "Report generato: $REPORT_FILE"
+}
+
+# -----------------------------------------------------------------------------
+# Esecuzione delle Configurazioni di Sicurezza
+# -----------------------------------------------------------------------------
 configure_kernel_security
 configure_secure_ssh
 configure_fail2ban
 configure_firewall
+generate_report
 ```
 
 #### **Perché questo approccio?**
