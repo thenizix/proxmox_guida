@@ -1,3 +1,20 @@
+**by TheNizix  02/2025** 
+
+> [!TIP]
+>
+>  Lo script dal Capitolo 1 è pensato per automatizzare il partizionamento del disco dopo l'installazione base di Proxmox, ma prima dobbiamo effettivamente installare Proxmox sul server. i:
+>
+> 1. Prima di tutto, devi scaricare l'ISO di Proxmox VE dal sito ufficiale (https://www.proxmox.com/downloads)
+> 2. Crea una chiavetta USB avviabile con l'ISO di Proxmox usando
+>    - Rufus (su Windows)
+>    - balenaEtcher (su qualsiasi sistema operativo)
+>    - dd (su Linux/Mac)
+> 3. Avvia il server dalla chiavetta USB e segui la procedura di installazione grafica di Proxmox, 
+
+Solo DOPO aver completato questa installazione base di Proxmox potrai avviare queste automazioni dalla CLI di Proxmox
+
+
+
 ### **Parte 1: Preparazione e Installazione Automatizzata**
 
 #### **Obiettivo**
