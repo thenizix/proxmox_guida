@@ -16,8 +16,11 @@
    
    ### Script di Verifica Prerequisiti
    Prima dell'installazione, è fondamentale eseguire una verifica completa del sistema.
-   **(Testato)**
-
+   
+   nano verifica.sh           # *incolla qui lo script, poi digita Ctl+o , enter, Ctl+x.*
+   chmod +x verifica.sh
+   ./verifica.sh**(Testato)**
+   
    ```bash
    #!/bin/bash 
    #verifica.sh
@@ -83,11 +86,19 @@
    Prima di procedere con l'installazione vera e propria, è necessario preparare l'ambiente. Ecco i passaggi fondamentali:
    
    1. **Download dell'ISO**
-      - Scaricare l'ultima versione di Proxmox VE dal sito ufficiale
+      - Scaricare l'ultima versione di [Proxmox VE](https://enterprise.proxmox.com/iso/proxmox-ve_8.3-1.iso) dal sito ufficiale
       - Verificare l'integrità del file tramite checksum SHA256
+      
+        ```
+        SHA256SUM
+        b5c2d10d6492d2d763e648bc8562d0f77a90c39fac3a664e676e795735198b45
+        ```
+      
+        
       
    2. **Preparazione del Supporto di Installazione**
       Per sistemi Linux:
+      
       ```bash
       # Creazione chiavetta USB avviabile
       dd if=proxmox-ve_*.iso of=/dev/sdX bs=1M status=progress
@@ -95,30 +106,45 @@
       Per sistemi Windows:
       - Utilizzare Rufus in modalità DD image
       - Selezionare la modalità di scrittura diretta dell'immagine
-   
+      
    3. **Configurazione del BIOS/UEFI**
       - Abilitare le tecnologie di virtualizzazione (VT-x/AMD-V)
       - Attivare IOMMU se si prevede di utilizzare il passthrough PCI
       - **Configurare l'ordine di boot** per avviare da USB
       - Se possibile, abilitare la modalità UEFI
    
-   ### Note sulla Scelta del Filesystem
    
-   Proxmox VE supporta diversi filesystem per lo storage locale. Ecco le principali opzioni:
    
-   - **ZFS**: Consigliato per ambienti di produzione
-     - Supporto nativo per snapshot
-     - Compressione trasparente
-     - Deduplicazione dei dati
-     - Richiede più RAM (minimo 8GB consigliati)
    
-   - **LVM-thin**: Alternativa leggera a ZFS
-     - Minore overhead di memoria
-     - Supporto per thin provisioning
-     - Compatibilità con hardware meno recente
    
-   - **ext4**: Opzione base
-     - Prestazioni affidabili
-     - Minore complessità
-     - Limitazioni nelle funzionalità avanzate
+   Una volta  installato (10 minuti)
+   Riavviare senza la chiavetta.
+   
+   Andare al PC 2 e connettersi all ip del server :8006
+   
+   
+   Da subito, vi accorgerete che non serve scrivere sudo ,
+    va aperta una shell e
+    magari uno script con shebang, va fatto l update dalla repo enterprise a quella free:
+   
+   ```bash
+   # Rimozione repository enterprise e aggiunta repository free
+   if [ -f "/etc/apt/sources.list.d/pve-enterprise.list" ]; then
+       rm /etc/apt/sources.list.d/pve-enterprise.list
+   fi
+   
+   if [ -f "/etc/apt/sources.list.d/ceph.list" ]; then
+       rm /etc/apt/sources.list.d/ceph.list
+   fi
+   
+   echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+   echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription" > /etc/apt/sources.list.d/ceph.list
+   
+   # Aggiorna chiavi repository
+   wget -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
+   
+   # Aggiorna repository
+   apt-get update
+   ```
+   
    

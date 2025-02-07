@@ -17,17 +17,17 @@
    - [x] Creazione storage locale base
 
 2. Storage Esterno (4TB)
-   - [ ] Studio opzioni montaggio (ext4, ZFS, etc)
-   - [ ] Test varie configurazioni mount
-   - [ ] Valutazione impatto performance
-   - [ ] Decisione: mount point ottimale
+   - [x] Studio opzioni montaggio (ext4, ZFS, etc)
+   - [x] Test varie configurazioni mount
+   - [x] Valutazione impatto performance
+   - [x] Decisione: mount point ottimale
 
 ## Fase 1: Single Node Security Lab
 
 ### 1.1 Kali Base Setup
 
 1. Network Isolation
-   - [ ] Creazione bridge dedicato (vmbr1)
+   - [x] Creazione bridge dedicato (vmbr1)
    - [ ] Test isolamento
    - [ ] Documentazione configurazione
 

@@ -14,8 +14,12 @@ Updated 09.00  7/2/25
 
 Un errore nelle ip-tables, la cancellazione di una chiave criptata, un errore di scrittura dell ip...
 E sono rimasto fuori dal network.
-Avavo uno scriptino bellino che funzionava, ma dopo averlo dato in pasto a claude e' diventato un mostro.... , ripartiro con meno foga. 
-Tutto il codice fuori dalla cartella trash, funziona... lo giuro!
+Avavo uno scriptino bellino che funzionava, ma dopo averlo dato in pasto a claude e' diventato un mostro.... troppa roba tutta insieme, ripartmeno foga. 
+**Tutto il codice fuori dalla cartella trash, funziona.**.. lo giuro!
+*Questo e' un backlog di alcuni giorni di lavoro per padroneggiare il sistema.*
+*Inizialmente essenziale e funzionante, .. ma FALLITO complicato e pasticciato con l'apporto di un AI. 
+Ripartendo da zero ho riscritto e debuggato il codice e  fa quello che dice.
+*Ogni passaggio e' funzionante e numerato.*
 
 ----------------------------------------------------------------------------------------------
 
@@ -53,9 +57,7 @@ Tutto il codice fuori dalla cartella trash, funziona... lo giuro!
 
 ---------------------------------------------------------------------------------------------------------------------------
 
-Questo e' un backlog di alcuni giorni di lavoro per padroneggiare il sistema.
-Inizialmente funzionante, .. ma FALLITOcomplicato e pasticciato con l'apporto di un AIIncolonnato malamente, stralciato e corretto con  un Ai.
-Nella Repo quello che e' fuori dalla cartella trash e' funzionante.
-Scripts in bash AutoEsplicativi che eseguono piccole funzioni base.
 
-Troverete degli errori, e qualcosa sara' da installare, ma dopo smanettamenti minimi a me funziona (va) tutto :)
+ 
+
+ 
