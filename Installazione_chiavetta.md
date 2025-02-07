@@ -1,23 +1,9 @@
-1. # Guida Completa all'Implementazione di Proxmox VE
-
-   ## Prefazione
-   Questa guida è stata sviluppata per fornire un'implementazione completa e pratica di Proxmox Virtual Environment (VE), con particolare attenzione alle esigenze degli utenti italiani. Le procedure sono state accuratamente testate e validate in ambienti di produzione.
-
-   ## Introduzione a Proxmox VE
-   Proxmox VE è una piattaforma di virtualizzazione open source che combina due potenti tecnologie:
-   - KVM (Kernel-based Virtual Machine) per le macchine virtuali tradizionali
-   - LXC (Linux Containers) per la containerizzazione leggera
-
-   La scelta di Proxmox VE offre diversi vantaggi:
-   - Soluzione completamente open source
-   - Interfaccia web intuitiva basata su Debian
-   - Supporto nativo per cluster fisici
-   - Migrazione a caldo delle macchine virtuali
-   - Gestione integrata dei container LXC
+1. # Guida Proxmox VE
 
    ### Requisiti di Sistema
+   
    Prima di iniziare l'installazione, è necessario verificare che il sistema soddisfi i seguenti requisiti minimi:
-
+   
    - **CPU**: processore 64-bit (Intel EMT64 o AMD64) con supporto per virtualizzazione
      - Intel: tecnologia VT-x
      - AMD: tecnologia AMD-V
@@ -25,17 +11,12 @@
    - **Storage**:
      - Sistema operativo: minimo 32GB
      - Spazio aggiuntivo per VM/Container: in base alle necessità
-   - **Rete**: scheda di rete Gigabit (consigliata)
-   - **Configurazione dischi**:
-     - Disco 1: dedicato al sistema operativo Proxmox
-     - Disco 2: dedicato allo storage per VM/Container
-
    
-
    ## Capitolo 1: Verifica e Preparazione del Sistema
-
+   
    ### Script di Verifica Prerequisiti
-   Prima dell'installazione, è fondamentale eseguire una verifica completa del sistema. Il seguente script automatizza questo processo:
+   Prima dell'installazione, è fondamentale eseguire una verifica completa del sistema.
+   **(Testato)**
 
    ```bash
    #!/bin/bash 
@@ -96,11 +77,11 @@
        fi
    done
    ```
-
+   
    ### Preparazione dell'Ambiente di Installazione
-
+   
    Prima di procedere con l'installazione vera e propria, è necessario preparare l'ambiente. Ecco i passaggi fondamentali:
-
+   
    1. **Download dell'ISO**
       - Scaricare l'ultima versione di Proxmox VE dal sito ufficiale
       - Verificare l'integrità del file tramite checksum SHA256
@@ -114,37 +95,30 @@
       Per sistemi Windows:
       - Utilizzare Rufus in modalità DD image
       - Selezionare la modalità di scrittura diretta dell'immagine
-
+   
    3. **Configurazione del BIOS/UEFI**
       - Abilitare le tecnologie di virtualizzazione (VT-x/AMD-V)
       - Attivare IOMMU se si prevede di utilizzare il passthrough PCI
-      - Configurare l'ordine di boot per avviare da USB
+      - **Configurare l'ordine di boot** per avviare da USB
       - Se possibile, abilitare la modalità UEFI
-
+   
    ### Note sulla Scelta del Filesystem
-
+   
    Proxmox VE supporta diversi filesystem per lo storage locale. Ecco le principali opzioni:
-
+   
    - **ZFS**: Consigliato per ambienti di produzione
      - Supporto nativo per snapshot
      - Compressione trasparente
      - Deduplicazione dei dati
      - Richiede più RAM (minimo 8GB consigliati)
-
+   
    - **LVM-thin**: Alternativa leggera a ZFS
      - Minore overhead di memoria
      - Supporto per thin provisioning
      - Compatibilità con hardware meno recente
-
+   
    - **ext4**: Opzione base
      - Prestazioni affidabili
      - Minore complessità
      - Limitazioni nelle funzionalità avanzate
-
-   La scelta del filesystem dovrebbe essere basata su:
-   - Quantità di RAM disponibile
-   - Tipo di carico di lavoro previsto
-   - Necessità di funzionalità avanzate
-   - Familiarità con la gestione del filesystem
-
-    
+   
