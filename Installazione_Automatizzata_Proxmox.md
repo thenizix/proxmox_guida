@@ -1654,7 +1654,7 @@ La guida è ben strutturata e segue una logica chiara nella configurazione autom
 
 ------
 
-### **Cosa Viene Realizzato Dopo Aver Eseguito Tutti Gli Script**
+###  **Cosa Viene Realizzato Dopo Aver Eseguito Tutti Gli Script**
 
 Dopo aver seguito l’intera guida, il sistema Proxmox VE sarà configurato con:
 
