@@ -177,17 +177,38 @@ Questo script configura in maniera automatica la rete di Proxmox VE creando dei 
 
 ```bash
 #!/bin/bash
-# Script di configurazione iniziale della rete per Proxmox VE
+# =============================================================================
+# Script di configurazione della rete per Proxmox VE
+# Versione: 2.0
+# Autore: TheNizix
+# Data: 02/2025
+# =============================================================================
 
-# Funzione di logging per tracciare le operazioni
+# -----------------------------------------------------------------------------
+# Costanti di configurazione
+# -----------------------------------------------------------------------------
+readonly LOG_FILE="/var/log/proxmox-setup.log"         # File di log per tracciare le operazioni
+readonly VLAN_RANGE="2-4094"                          # Range VLAN consentito
+readonly BRIDGE_PREFIX="vmbr"                         # Prefisso per i bridge di rete
+readonly MANAGEMENT_VLAN=1                            # VLAN per management
+readonly STORAGE_VLAN=2                               # VLAN per storage
+readonly VM_VLAN=3                                    # VLAN per le VM
+
+# -----------------------------------------------------------------------------
+# Funzione di logging
+# -----------------------------------------------------------------------------
 log() {
     local level="$1"
     local message="$2"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" | tee -a "$LOG_FILE"
     if [ "$level" = "ERROR" ]; then
         exit 1
     fi
 }
+
+# -----------------------------------------------------------------------------
+# Funzioni per la visualizzazione della configurazione
+# -----------------------------------------------------------------------------
 
 # Funzione per disegnare una linea della tabella
 draw_line() {
@@ -199,7 +220,7 @@ print_row() {
     printf "| %-18s | %-13s | %-13s | %-23s |\n" "$1" "$2" "$3" "$4"
 }
 
-# Funzione per mostrare la configurazione di rete
+# Funzione per mostrare la configurazione di rete completa
 display_network_config() {
     local mgmt_ip="$1"
     local mgmt_prefix="$2"
@@ -235,24 +256,34 @@ display_network_config() {
     echo "   - NAT: Enabled verso vmbr0"
 }
 
-# Costanti di configurazione
-readonly VLAN_RANGE="2-4094"
-readonly BRIDGE_PREFIX="vmbr"
-readonly MANAGEMENT_VLAN=1
-readonly STORAGE_VLAN=2
-readonly VM_VLAN=3
-
-# Funzione per configurare i bridge di rete
+# -----------------------------------------------------------------------------
+# Funzione principale per la configurazione dei bridge di rete
+# -----------------------------------------------------------------------------
 configure_network_bridges() {
+    log "INFO" "Avvio configurazione bridge di rete..."
+
+    # Rileva l'interfaccia fisica principale
     local physical_interface="enp0s31f6"
+    # Verifica che l'interfaccia esista
+    if ! ip link show "$physical_interface" &>/dev/null; then
+        log "ERROR" "Interfaccia $physical_interface non trovata"
+    fi
+
+    # Configurazione IP di management
     local current_ip="192.168.1.33"
     local current_prefix="24"
-
-    # Backup existing configuration
-    cp /etc/network/interfaces /etc/network/interfaces.backup
     
-    # Genera la configurazione di rete
+    # Backup della configurazione esistente
+    if [ -f /etc/network/interfaces ]; then
+        cp /etc/network/interfaces "/etc/network/interfaces.backup.$(date +%Y%m%d)"
+        log "INFO" "Backup configurazione di rete creato"
+    fi
+    
+    # Genera la nuova configurazione di rete
     cat > /etc/network/interfaces << EOL
+# Configurazione di rete Proxmox VE
+# Generata automaticamente il $(date)
+
 auto lo
 iface lo inet loopback
 
@@ -282,24 +313,75 @@ iface ${BRIDGE_PREFIX}2 inet static
     bridge-stp off
     bridge-fd 0
     post-up echo 1 > /proc/sys/net/ipv4/ip_forward
-    post-up iptables -t nat -A POSTROUTING -s "192.168.200.0/24" -o ${BRIDGE_PREFIX}0 -j MASQUERADE
+    post-up iptables -t nat -A POSTROUTING -s '192.168.200.0/24' -o ${BRIDGE_PREFIX}0 -j MASQUERADE
 EOL
 
-    # Imposta hostname basato sull'IP
+    # Configurazione hostname
+    # Nota: manteniamo i punti nell'IP ma usiamo trattini solo per l'hostname
     local hostname="pve-$(echo $current_ip | tr '.' '-')"
     echo "$hostname" > /etc/hostname
+    
+    # Aggiorna /etc/hosts
+    sed -i "s/^127.0.1.1.*$/127.0.1.1\t$hostname/" /etc/hosts
+    if ! grep -q "127.0.1.1" /etc/hosts; then
+        echo "127.0.1.1\t$hostname" >> /etc/hosts
+    fi
 
     log "INFO" "Configurazione di rete completata per l'interfaccia $physical_interface"
-    log "INFO" "Un backup della configurazione precedente è stato salvato in /etc/network/interfaces.backup"
+    log "INFO" "Un backup della configurazione precedente è stato salvato"
     
     # Mostra la tabella di configurazione
     display_network_config "$current_ip" "$current_prefix"
     
-    echo -e "\nNota: Per applicare le modifiche, riavviare il sistema o eseguire 'systemctl restart networking'"
+    echo -e "\nNota: Per applicare le modifiche, eseguire uno dei seguenti comandi:"
+    echo "1. systemctl restart networking"
+    echo "2. reboot"
 }
 
-# Esecuzione della funzione principale
-configure_network_bridges
+# -----------------------------------------------------------------------------
+# Funzione per la verifica della configurazione
+# -----------------------------------------------------------------------------
+verify_network_config() {
+    log "INFO" "Verifica della configurazione di rete..."
+
+    # Verifica che tutti i bridge siano stati creati
+    for i in {0..2}; do
+        if ! ip link show "${BRIDGE_PREFIX}$i" &>/dev/null; then
+            log "ERROR" "Bridge ${BRIDGE_PREFIX}$i non creato correttamente"
+        fi
+    done
+
+    # Verifica IP forwarding
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+        log "WARN" "IP forwarding non abilitato"
+    fi
+
+    # Verifica regole NAT
+    if ! iptables -t nat -C POSTROUTING -s '192.168.200.0/24' -o ${BRIDGE_PREFIX}0 -j MASQUERADE 2>/dev/null; then
+        log "WARN" "Regola NAT non trovata"
+    fi
+
+    log "INFO" "Verifica configurazione completata"
+}
+
+# -----------------------------------------------------------------------------
+# Esecuzione principale
+# -----------------------------------------------------------------------------
+main() {
+    # Verifica che lo script sia eseguito come root
+    if [ "$(id -u)" != "0" ]; then
+        log "ERROR" "Questo script deve essere eseguito come root"
+    fi
+
+    # Esegui la configurazione
+    configure_network_bridges
+    
+    # Verifica la configurazione
+    verify_network_config
+}
+
+# Avvio dello script
+main
 ```
 
 #### **Perché  questo approccio?**
@@ -841,10 +923,13 @@ EOL
 
    1. Salvare lo script come `proxmox-kali-setup.sh`
    2. Rendere lo script eseguibile:
+
    ```bash
    chmod +x proxmox-kali-setup.sh
    ```
+
    3. Eseguire come root:
+
    ```bash
    ./proxmox-kali-setup.sh
    ```
@@ -882,24 +967,28 @@ EOL
    ## Troubleshooting
 
    1. **Problemi Download:**
+
       ```bash
       # Verifica download manuale
       wget https://cdimage.kali.org/kali-2024.1/kali-linux-2024.1-installer-amd64.iso
       ```
 
    2. **Problemi Template:**
+
       ```bash
       # Verifica stato template
       qm status 9000
       ```
 
    3. **Problemi Rete:**
+
       ```bash
       # Verifica bridge
       ip a show vmbr1
       ```
 
    4. **Log Proxmox:**
+
       ```bash
       # Consulta log
       tail -f /var/log/proxmox-setup.log
@@ -1342,6 +1431,7 @@ by TheNizix  02/2025
 Dopo aver eseguito gli script di installazione e configurazione dalla guida, avrai un server Proxmox VE completamente configurato con i seguenti componenti:
 
 ### Configurazione Base del Sistema
+
 - Sistema Operativo: Proxmox VE (basato su Debian)
 - Struttura dello Storage:
   - Partizione di sistema (30GB) con filesystem ext4
@@ -1354,6 +1444,7 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
   - VLAN 4000 per la rete del cluster per comunicazioni ad alta disponibilità
 
 ### Configurazione della Sicurezza
+
 - Accesso SSH blindato:
   - Login root limitato all'autenticazione con chiave
   - Autenticazione con password disabilitata
@@ -1367,6 +1458,7 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Parametri di sicurezza del kernel ottimizzati per ambiente di virtualizzazione
 
 ### Configurazione Alta Disponibilità
+
 - Comunicazione cluster Corosync configurata
 - Meccanismi di fencing per prevenire split-brain
 - Gruppi HA definiti per il failover delle VM
@@ -1375,6 +1467,7 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Accesso al Server
 
 ### Accesso Interfaccia Web
+
 - URL: https://[ip-server]:8006
 - Credenziali predefinite:
   - Nome utente: root
@@ -1382,11 +1475,13 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Browser supportati: Versioni recenti di Chrome, Firefox, Safari
 
 ### Accesso SSH
+
 - Comando: `ssh root@[ip-server]`
 - Autenticazione: Richiesta chiave SSH (autenticazione password disabilitata)
 - Porta: 22 (con protezione rate limiting)
 
 ### Accesso di Rete per le VM
+
 - Rete interna: 192.168.100.0/24
 - Gateway predefinito: 192.168.100.1
 - NAT abilitato per accesso internet
@@ -1395,12 +1490,14 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Risorse Disponibili
 
 ### Sistemi di Storage
+
 - Pool di storage Local-LVM per dischi VM
 - Posizione backup: /var/lib/vz/dump
 - Storage ISO: /var/lib/vz/template/iso
 - Storage template: /var/lib/vz/template/cache
 
 ### Template Macchine Virtuali
+
 - Template base Ubuntu Server (ID: 9000)
   - 2GB RAM (modificabile)
   - 2 vCPU (modificabile)
@@ -1411,6 +1508,7 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Utilizzo del Sistema
 
 ### Creazione Nuove Macchine Virtuali
+
 1. Accedere all'interfaccia web
 2. Selezionare 'Crea VM' o clonare il template 9000
 3. Regolare le risorse secondo necessità
@@ -1418,12 +1516,14 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 5. Avviare la VM e accedere alla console tramite interfaccia web
 
 ### Gestione Macchine Virtuali
+
 - Accesso console: Tramite interfaccia web o client SPICE
 - Configurazione rete: Consigliato IP statico nel range 192.168.100.0/24
 - Operazioni di backup: Disponibili tramite interfaccia web o comando `vzdump`
 - Modifica risorse: Possibile durante l'esecuzione della VM per la maggior parte dei parametri
 
 ### Monitoraggio
+
 - Stato sistema: Disponibile tramite dashboard interfaccia web
 - Salute cluster: Accessibile via comando `pvecm status`
 - Utilizzo risorse: Grafici in tempo reale nell'interfaccia web
@@ -1431,6 +1531,7 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 - Demone di monitoraggio personalizzato: In esecuzione come servizio systemd
 
 ### Operazioni di Backup
+
 - Servizio di backup automatizzato configurato
 - Posizione backup: /mnt/backup
 - Periodo di conservazione: 30 giorni
@@ -1439,12 +1540,14 @@ Dopo aver eseguito gli script di installazione e configurazione dalla guida, avr
 ## Procedure di Manutenzione
 
 ### Aggiornamenti Sistema
+
 ```bash
 apt update
 apt full-upgrade
 ```
 
 ### Verifica Backup
+
 ```bash
 # Controlla stato backup
 ls -l /mnt/backup/dump
@@ -1453,6 +1556,7 @@ vzdump --verify [file-backup]
 ```
 
 ### Gestione Storage
+
 ```bash
 # Controlla stato storage
 pvesm status
@@ -1461,6 +1565,7 @@ df -h
 ```
 
 ### Monitoraggio Sicurezza
+
 ```bash
 # Controlla tentativi di accesso falliti
 fail2ban-client status
@@ -1471,6 +1576,7 @@ iptables -L
 ## Operazioni Comuni
 
 ### Creazione Nuova VM da Template
+
 ```bash
 # Clona template 9000 in nuova VM ID 101
 qm clone 9000 101 --name nuova-vm
@@ -1479,6 +1585,7 @@ qm start 101
 ```
 
 ### Gestione Stati VM
+
 ```bash
 # Ferma VM
 qm stop [vmid]
@@ -1489,6 +1596,7 @@ qm reset [vmid]
 ```
 
 ### Backup Singola VM
+
 ```bash
 vzdump [vmid] --compress zstd --mode snapshot
 ```
@@ -1496,6 +1604,7 @@ vzdump [vmid] --compress zstd --mode snapshot
 ## Risoluzione Problemi
 
 ### Problemi Comuni
+
 1. Accesso Interfaccia Web
    - Controllare regole firewall
    - Verificare stato servizio pveproxy
@@ -1512,12 +1621,14 @@ vzdump [vmid] --compress zstd --mode snapshot
    - Esaminare log di sistema
 
 ### Posizione Log
+
 - Log Proxmox: /var/log/pve/
 - Log cluster: /var/log/corosync/
 - Log sistema: /var/log/syslog
 - Log sicurezza: /var/log/auth.log
 
 ### Risorse di Supporto
+
 - Documentazione ufficiale: https://pve.proxmox.com/wiki/
 - Forum comunità: https://forum.proxmox.com/
 - Documentazione locale: Disponibile tramite sistema di aiuto dell'interfaccia web
